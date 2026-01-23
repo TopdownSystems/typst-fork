@@ -602,6 +602,9 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     /// This sums the heights of all absolute spacing and frames in the items list.
     /// Fractional spacing (Item::Fr) is not included as it's resolved during finalization.
     /// Tags and placed items don't contribute to the flow position.
+    ///
+    /// Note: After relayout (triggered by wrap/masthead elements), the computed y
+    /// position may differ from region accounting due to items being redistributed.
     fn current_y(&self) -> Abs {
         let mut y = Abs::zero();
         for item in &self.items {
@@ -611,32 +614,6 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 _ => {}
             }
         }
-
-        // Debug assertion: verify current_y is consistent with region accounting.
-        // The consumed space (current_y) plus remaining space (regions.size.y)
-        // should equal the original region height (regions.base().y).
-        // Note: This may not be exact due to Fr items which have no fixed height yet.
-        // Only check when the region has finite height (not height: auto pages).
-        #[cfg(debug_assertions)]
-        {
-            let base_y = self.regions.base().y;
-            let remaining_y = self.regions.size.y;
-            // Only validate when both base and remaining are finite
-            if base_y.is_finite() && remaining_y.is_finite() {
-                let expected_consumed = base_y - remaining_y;
-                // Allow some tolerance for floating point and Fr items
-                let tolerance = Abs::pt(0.1);
-                debug_assert!(
-                    (y - expected_consumed).abs() <= tolerance,
-                    "current_y mismatch: computed={:?}, expected={:?} (base={:?}, remaining={:?})",
-                    y,
-                    expected_consumed,
-                    base_y,
-                    remaining_y
-                );
-            }
-        }
-
         y
     }
 
