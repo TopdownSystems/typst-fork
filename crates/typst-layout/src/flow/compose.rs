@@ -504,9 +504,16 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         }
 
         // Create a cutout using the explicit width from the masthead.
+        // Unlike wrap, masthead cutouts extend to the full remaining column height,
+        // not just the content height. This creates the "sidebar" effect where
+        // text flows in a narrower column for the entire page/region.
+        let cutout_end = match masthead.scope {
+            PlacementScope::Column => regions.base().y,
+            PlacementScope::Parent => self.page_base.y,
+        };
         let cutout = RegionCutout::new(
             current_y,
-            current_y + frame.height(),
+            cutout_end,
             masthead.side,
             masthead.width, // Use explicit width, not frame.width()
             masthead.clearance,
