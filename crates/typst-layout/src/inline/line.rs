@@ -1,3 +1,9 @@
+//! Line representation and frame building for inline layout.
+//!
+//! This module defines the [`Line`] type which represents a laid out line of text,
+//! and handles the finalization of lines into frames. The `x_offset` field supports
+//! text flow around cutouts by shifting lines horizontally.
+
 use std::fmt::{self, Debug, Formatter};
 use std::ops::{Deref, DerefMut};
 
@@ -39,6 +45,12 @@ pub struct Line<'a> {
     /// Whether the line ends with a hyphen or dash, either naturally or through
     /// hyphenation.
     pub dash: Option<Dash>,
+    /// Horizontal offset from the region start (for cutout avoidance).
+    ///
+    /// When text flows around cutouts, lines may need to be shifted
+    /// horizontally to avoid the cutout area. This offset is applied
+    /// during frame finalization.
+    pub x_offset: Abs,
 }
 
 impl Line<'_> {
@@ -49,6 +61,7 @@ impl Line<'_> {
             width: Abs::zero(),
             justify: false,
             dash: None,
+            x_offset: Abs::zero(),
         }
     }
 
@@ -191,7 +204,7 @@ pub fn line<'a>(
     // Compute the line's width.
     let width = items.iter().map(Item::natural_width).sum();
 
-    Line { items, width, justify, dash }
+    Line { items, width, justify, dash, x_offset: Abs::zero() }
 }
 
 /// Collects / reshapes all items for the line with the given `range`.
@@ -496,6 +509,29 @@ pub fn commit(
     // hanging indent arises naturally due to the line width.
     if p.config.dir == Dir::LTR {
         offset += p.config.hanging_indent;
+    }
+
+    // Apply x_offset for cutout avoidance (text flow around images).
+    // This shifts the line to avoid overlapping with cutouts on the start side.
+    offset += line.x_offset;
+
+    // Debug assertion: Validate that x_offset doesn't push content past the frame width.
+    // The line width should have been computed using reduced available width from cutouts,
+    // so x_offset + line.width should fit within the total width.
+    #[cfg(debug_assertions)]
+    {
+        let content_end = line.x_offset + line.width + p.config.hanging_indent;
+        // Use a small tolerance for floating-point comparison
+        let tolerance = Abs::pt(0.1);
+        debug_assert!(
+            content_end <= width + tolerance,
+            "x_offset bounds violation: x_offset ({:?}) + line.width ({:?}) + hanging_indent ({:?}) = {:?} > width ({:?})",
+            line.x_offset,
+            line.width,
+            p.config.hanging_indent,
+            content_end,
+            width
+        );
     }
 
     // Handle hanging punctuation to the left.

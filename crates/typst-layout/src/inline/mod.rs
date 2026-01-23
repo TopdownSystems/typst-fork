@@ -1,3 +1,10 @@
+//! Inline layout for paragraphs and text content.
+//!
+//! This module handles the layout of inline content, including text shaping,
+//! BiDi analysis, line breaking, and finalization into frames. It supports
+//! variable-width line breaking through the [`width_provider`] abstraction,
+//! enabling text to flow around cutouts created by wrap elements.
+
 #[path = "box.rs"]
 mod box_;
 mod collect;
@@ -7,6 +14,7 @@ mod line;
 mod linebreak;
 mod prepare;
 mod shaping;
+mod width_provider;
 
 pub use self::box_::layout_box;
 pub use self::shaping::{SharedShapingContext, create_shape_plan, get_font_and_covers};
@@ -17,7 +25,7 @@ use typst_library::diag::SourceResult;
 use typst_library::engine::{Engine, Route, Sink, Traced};
 use typst_library::foundations::{Packed, Smart, StyleChain};
 use typst_library::introspection::{Introspector, Locator, LocatorLink, SplitLocator};
-use typst_library::layout::{Abs, AlignElem, Dir, FixedAlignment, Fragment, Size};
+use typst_library::layout::{Abs, AlignElem, Dir, FixedAlignment, Fragment, RegionCutout, Size};
 use typst_library::model::{
     EnumElem, FirstLineIndent, JustificationLimits, Linebreaks, ListElem, ParElem,
     ParLine, ParLineMarker, TermsElem,
@@ -26,11 +34,13 @@ use typst_library::routines::{Arenas, Pair, RealizationKind, Routines};
 use typst_library::text::{Costs, Lang, TextElem};
 use typst_utils::{Numeric, Protected, SliceExt};
 
+pub use self::width_provider::CutoutWidth;
+
 use self::collect::{Item, Segment, SpanMapper, collect};
 use self::deco::decorate;
 use self::finalize::finalize;
 use self::line::{Line, apply_shift, commit, line};
-use self::linebreak::{Breakpoint, linebreak};
+use self::linebreak::{Breakpoint, linebreak, linebreak_with_provider};
 use self::prepare::{Preparation, prepare};
 use self::shaping::{
     BEGIN_PUNCT_PAT, END_PUNCT_PAT, ShapedGlyph, ShapedText, cjk_punct_style,
@@ -63,6 +73,54 @@ pub fn layout_par(
         region,
         expand,
         situation,
+    )
+}
+
+/// Layouts the paragraph with optional cutout context.
+///
+/// This version allows specifying cutouts that affect line widths,
+/// enabling text to flow around wrap elements.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_par_with_context(
+    elem: &Packed<ParElem>,
+    engine: &mut Engine,
+    locator: Tracked<Locator>,
+    styles: StyleChain,
+    region: Size,
+    expand: bool,
+    situation: ParSituation,
+    context: Option<&InlineContext<'_>>,
+) -> SourceResult<Fragment> {
+    // With context, we need to do the layout directly (can't memoize cutout-dependent layout)
+    // because the cutouts depend on the paragraph's position which isn't known at memoization time.
+    let link = LocatorLink::new(locator);
+    let mut split_locator = Locator::link(&link).split();
+
+    let arenas = Arenas::default();
+    let children = (engine.routines.realize)(
+        RealizationKind::LayoutPar,
+        engine,
+        &mut split_locator,
+        &arenas,
+        &elem.body,
+        styles,
+    )?;
+
+    layout_inline_impl(
+        engine,
+        &children,
+        &mut split_locator,
+        styles,
+        region,
+        expand,
+        Some(situation),
+        &ConfigBase {
+            justify: elem.justify.get(styles),
+            linebreaks: elem.linebreaks.get(styles),
+            first_line_indent: elem.first_line_indent.get(styles),
+            hanging_indent: elem.hanging_indent.resolve(styles),
+        },
+        context,
     )
 }
 
@@ -119,6 +177,7 @@ fn layout_par_impl(
             first_line_indent: elem.first_line_indent.get(styles),
             hanging_indent: elem.hanging_indent.resolve(styles),
         },
+        None, // No cutout context for memoized paragraph layout
     )
 }
 
@@ -130,6 +189,22 @@ pub fn layout_inline<'a>(
     shared: StyleChain<'a>,
     region: Size,
     expand: bool,
+) -> SourceResult<Fragment> {
+    layout_inline_with_context(engine, children, locator, shared, region, expand, None)
+}
+
+/// Lays out realized content with inline layout and cutout context.
+///
+/// This version allows specifying cutouts that affect line widths,
+/// enabling text to flow around images or other floated content.
+pub fn layout_inline_with_context<'a>(
+    engine: &mut Engine,
+    children: &[Pair<'a>],
+    locator: &mut SplitLocator<'a>,
+    shared: StyleChain<'a>,
+    region: Size,
+    expand: bool,
+    context: Option<&InlineContext<'_>>,
 ) -> SourceResult<Fragment> {
     layout_inline_impl(
         engine,
@@ -145,6 +220,7 @@ pub fn layout_inline<'a>(
             first_line_indent: shared.get(ParElem::first_line_indent),
             hanging_indent: shared.resolve(ParElem::hanging_indent),
         },
+        context,
     )
 }
 
@@ -159,6 +235,7 @@ fn layout_inline_impl<'a>(
     expand: bool,
     par: Option<ParSituation>,
     base: &ConfigBase,
+    context: Option<&InlineContext<'_>>,
 ) -> SourceResult<Fragment> {
     // Prepare configuration that is shared across the whole inline layout.
     let config = configuration(base, children, shared, par);
@@ -171,7 +248,20 @@ fn layout_inline_impl<'a>(
     let p = prepare(engine, &config, &text, segments, spans)?;
 
     // Break the text into lines.
-    let lines = linebreak(engine, &p, region.x - config.hanging_indent);
+    // Use cutout-aware width provider if cutouts are present.
+    let base_width = region.x - config.hanging_indent;
+    let lines = match context {
+        Some(ctx) if ctx.has_cutouts() => {
+            let width_provider = CutoutWidth::new(
+                base_width,
+                ctx.cutouts,
+                ctx.y_offset,
+                config.dir,
+            );
+            linebreak_with_provider(engine, &p, &width_provider)
+        }
+        _ => linebreak(engine, &p, base_width),
+    };
 
     // Turn the selected lines into frames.
     finalize(engine, &p, &lines, region, expand, locator)
@@ -252,6 +342,33 @@ pub enum ParSituation {
     Consecutive,
     /// Any other kind of paragraph.
     Other,
+}
+
+/// Context for inline layout with cutout information.
+///
+/// This allows paragraphs to be laid out with variable-width lines
+/// where cutouts (from wrap elements) affect the available width.
+#[derive(Debug, Clone, Default)]
+pub struct InlineContext<'a> {
+    /// Cutouts that affect line widths at different vertical positions.
+    pub cutouts: &'a [RegionCutout],
+    /// The starting y position of this paragraph in the region.
+    ///
+    /// Used to translate cumulative paragraph heights to region-relative
+    /// y coordinates for cutout queries.
+    pub y_offset: Abs,
+}
+
+impl<'a> InlineContext<'a> {
+    /// Creates a new inline context with cutout information.
+    pub fn new(cutouts: &'a [RegionCutout], y_offset: Abs) -> Self {
+        Self { cutouts, y_offset }
+    }
+
+    /// Returns true if this context has cutouts that may affect layout.
+    pub fn has_cutouts(&self) -> bool {
+        !self.cutouts.is_empty()
+    }
 }
 
 /// Raw values from a `ParElem` or style chain. Used to initialize a [`Config`].

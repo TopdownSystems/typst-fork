@@ -7,6 +7,7 @@ mod axes;
 mod columns;
 mod container;
 mod corners;
+mod cutout;
 mod dir;
 mod em;
 mod fr;
@@ -17,6 +18,7 @@ mod hide;
 #[path = "layout.rs"]
 mod layout_;
 mod length;
+mod masthead;
 #[path = "measure.rs"]
 mod measure_;
 mod pad;
@@ -33,6 +35,7 @@ mod size;
 mod spacing;
 mod stack;
 mod transform;
+mod wrap;
 
 pub use self::abs::*;
 pub use self::align::*;
@@ -41,6 +44,7 @@ pub use self::axes::*;
 pub use self::columns::*;
 pub use self::container::*;
 pub use self::corners::*;
+pub use self::cutout::*;
 pub use self::dir::*;
 pub use self::em::*;
 pub use self::fr::*;
@@ -50,6 +54,7 @@ pub use self::grid::*;
 pub use self::hide::*;
 pub use self::layout_::*;
 pub use self::length::*;
+pub use self::masthead::*;
 pub use self::measure_::*;
 pub use self::pad::*;
 pub use self::page::*;
@@ -65,6 +70,7 @@ pub use self::size::*;
 pub use self::spacing::*;
 pub use self::stack::*;
 pub use self::transform::*;
+pub use self::wrap::*;
 
 use crate::foundations::Scope;
 
@@ -97,6 +103,8 @@ pub fn define(global: &mut Scope) {
     global.define_elem::<RotateElem>();
     global.define_elem::<SkewElem>();
     global.define_elem::<HideElem>();
+    global.define_elem::<WrapElem>();
+    global.define_elem::<MastheadElem>();
     global.define_func::<measure>();
     global.define_func::<layout>();
     global.reset_category();

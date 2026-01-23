@@ -1,6 +1,6 @@
 use std::fmt::{self, Debug, Formatter};
 
-use crate::layout::{Abs, Axes, Size};
+use crate::layout::{Abs, Axes, Dir, RegionCutout, Size, WidthInfo, cutout};
 
 /// A single region to layout into.
 #[derive(Debug, Copy, Clone, Hash)]
@@ -16,6 +16,29 @@ impl Region {
     /// Create a new region.
     pub fn new(size: Size, expand: Axes<bool>) -> Self {
         Self { size, expand }
+    }
+
+    /// Query available width at a y position given cutouts.
+    ///
+    /// If the cutouts slice is empty, returns the full region width (fast path).
+    /// The direction parameter is used to interpret start/end sides.
+    pub fn width_at(&self, y: Abs, cutouts: &[RegionCutout], dir: Dir) -> WidthInfo {
+        cutout::width_at(self.size.x, y, cutouts, dir)
+    }
+
+    /// Query minimum width available in a vertical range given cutouts.
+    ///
+    /// Returns the most restrictive width info (smallest available width)
+    /// within the specified range. This is needed when laying out content
+    /// that spans multiple lines.
+    pub fn width_in_range(
+        &self,
+        y_start: Abs,
+        y_end: Abs,
+        cutouts: &[RegionCutout],
+        dir: Dir,
+    ) -> WidthInfo {
+        cutout::width_in_range(self.size.x, y_start, y_end, cutouts, dir)
     }
 }
 

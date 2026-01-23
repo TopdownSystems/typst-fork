@@ -1,12 +1,20 @@
+//! Distribution of flow children into a single region.
+//!
+//! The distributor takes collected children and places them into a frame,
+//! handling spacing, alignment, and deferred paragraph layout. When wrap or
+//! masthead cutouts are active, paragraphs are laid out with variable-width
+//! lines to flow around the cutouts.
+
 use typst_library::introspection::Tag;
 use typst_library::layout::{
-    Abs, Axes, FixedAlignment, Fr, Frame, FrameItem, Point, Region, Regions, Rel, Size,
+    Abs, Axes, FixedAlignment, Fr, Frame, FrameItem, Point, Ratio, Region, Regions, Rel,
+    Size,
 };
 use typst_utils::Numeric;
 
 use super::{
-    Child, Composer, FlowResult, LineChild, MultiChild, MultiSpill, PlacedChild,
-    SingleChild, Stop, Work,
+    Child, Composer, FlowResult, LineChild, MastheadChild, MultiChild, MultiSpill, ParChild,
+    PlacedChild, SingleChild, Stop, Work, WrapChild,
 };
 
 /// Distributes as many children as fit from `composer.work` into the first
@@ -133,9 +141,12 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             Child::Rel(amount, weakness) => self.rel(*amount, *weakness),
             Child::Fr(fr, weakness) => self.fr(*fr, *weakness),
             Child::Line(line) => self.line(line)?,
+            Child::Par(par) => self.par(par)?,
             Child::Single(single) => self.single(single)?,
             Child::Multi(multi) => self.multi(multi)?,
             Child::Placed(placed) => self.placed(placed)?,
+            Child::Wrap(wrap) => self.wrap(wrap)?,
+            Child::Masthead(masthead) => self.masthead(masthead)?,
             Child::Flush => self.flush()?,
             Child::Break(weak) => self.break_(*weak)?,
         }
@@ -293,6 +304,84 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         }
 
         self.frame(line.frame.clone(), line.align, false, false)
+    }
+
+    /// Processes a paragraph with cutout awareness.
+    ///
+    /// This layouts the paragraph with the current cutouts, allowing text
+    /// to flow around wrap elements.
+    fn par(&mut self, par: &'b ParChild<'a>) -> FlowResult<()> {
+        // Get the current y position and cutouts
+        let y_offset = self.current_y();
+        let cutouts = &self.composer.column_cutouts;
+
+        // Layout the paragraph with cutout information
+        let frames = par.layout(self.composer.engine, cutouts, y_offset)?;
+
+        // Add spacing before the paragraph
+        let spacing = par.spacing.relative_to(self.regions.base().y);
+        self.rel(spacing.into(), 4);
+
+        // Determine whether to prevent widows and orphans, same as in collect.rs
+        let len = frames.len();
+        let costs = par.costs;
+        let prevent_orphans =
+            costs.orphan() > Ratio::zero() && len >= 2 && !frames[1].is_empty();
+        let prevent_widows = costs.widow() > Ratio::zero()
+            && len >= 2
+            && !frames[len.saturating_sub(2)].is_empty();
+        let prevent_all = len == 3 && prevent_orphans && prevent_widows;
+
+        // Store the heights of lines at the edges for need computation
+        let height_at = |i: usize| frames.get(i).map(Frame::height).unwrap_or_default();
+        let front_1 = height_at(0);
+        let front_2 = height_at(1);
+        let back_2 = height_at(len.saturating_sub(2));
+        let back_1 = height_at(len.saturating_sub(1));
+        let leading = par.leading;
+
+        // Process each line, similar to how pre-laid-out lines are handled
+        for (i, frame) in frames.into_iter().enumerate() {
+            if i > 0 {
+                // Add leading between lines
+                self.rel(leading.into(), 5);
+            }
+
+            // Compute `need` for widow/orphan prevention (same logic as collect.rs)
+            let need = if prevent_all && i == 0 {
+                front_1 + leading + front_2 + leading + back_1
+            } else if prevent_orphans && i == 0 {
+                front_1 + leading + front_2
+            } else if prevent_widows && i >= 2 && i + 2 == len {
+                back_2 + leading + back_1
+            } else {
+                frame.height()
+            };
+
+            // Check if the line fits (basic height check)
+            if !self.regions.size.y.fits(frame.height()) && self.regions.may_progress() {
+                return Err(Stop::Finish(false));
+            }
+
+            // Check if the line's need (including widow/orphan requirements) fits
+            // If it doesn't fit here but would fit in the next region, finish this region
+            if !self.regions.size.y.fits(need)
+                && self
+                    .regions
+                    .iter()
+                    .nth(1)
+                    .is_some_and(|region| region.y.fits(need))
+            {
+                return Err(Stop::Finish(false));
+            }
+
+            self.frame(frame, par.align, false, false)?;
+        }
+
+        // Add spacing after the paragraph
+        self.rel(spacing.into(), 4);
+
+        Ok(())
     }
 
     /// Processes an unbreakable block.
@@ -457,6 +546,98 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             self.items.push(Item::Placed(frame, placed));
         }
         Ok(())
+    }
+
+    /// Processes a wrap element.
+    ///
+    /// Wrap elements create cutout regions that text flows around. They are
+    /// handled by the composer which manages cutouts and triggers relayout.
+    fn wrap(&mut self, wrap: &'b WrapChild<'a>) -> FlowResult<()> {
+        // Delegate to the composer which handles cutout generation and relayout.
+        // Similar to floats, this might require relayout because the area
+        // available for distribution changes.
+        let weak_spacing = self.weak_spacing();
+        self.regions.size.y += weak_spacing;
+
+        // Calculate the current y position for the cutout.
+        let current_y = self.current_y();
+
+        self.composer.wrap(
+            wrap,
+            &self.regions,
+            current_y,
+            self.items.iter().any(|item| matches!(item, Item::Frame(..))),
+        )?;
+
+        self.regions.size.y -= weak_spacing;
+        Ok(())
+    }
+
+    /// Processes a masthead element.
+    ///
+    /// Masthead elements create fixed-width cutout regions that text flows around.
+    /// They work like wrap elements but use an explicit width parameter.
+    fn masthead(&mut self, masthead: &'b MastheadChild<'a>) -> FlowResult<()> {
+        // Delegate to the composer which handles cutout generation and relayout.
+        // Similar to wraps and floats, this might require relayout.
+        let weak_spacing = self.weak_spacing();
+        self.regions.size.y += weak_spacing;
+
+        // Calculate the current y position for the cutout.
+        let current_y = self.current_y();
+
+        self.composer.masthead(
+            masthead,
+            &self.regions,
+            current_y,
+            self.items.iter().any(|item| matches!(item, Item::Frame(..))),
+        )?;
+
+        self.regions.size.y -= weak_spacing;
+        Ok(())
+    }
+
+    /// Calculates the current y position based on distributed items.
+    ///
+    /// This sums the heights of all absolute spacing and frames in the items list.
+    /// Fractional spacing (Item::Fr) is not included as it's resolved during finalization.
+    /// Tags and placed items don't contribute to the flow position.
+    fn current_y(&self) -> Abs {
+        let mut y = Abs::zero();
+        for item in &self.items {
+            match item {
+                Item::Abs(v, _) => y += *v,
+                Item::Frame(frame, _) => y += frame.height(),
+                _ => {}
+            }
+        }
+
+        // Debug assertion: verify current_y is consistent with region accounting.
+        // The consumed space (current_y) plus remaining space (regions.size.y)
+        // should equal the original region height (regions.base().y).
+        // Note: This may not be exact due to Fr items which have no fixed height yet.
+        // Only check when the region has finite height (not height: auto pages).
+        #[cfg(debug_assertions)]
+        {
+            let base_y = self.regions.base().y;
+            let remaining_y = self.regions.size.y;
+            // Only validate when both base and remaining are finite
+            if base_y.is_finite() && remaining_y.is_finite() {
+                let expected_consumed = base_y - remaining_y;
+                // Allow some tolerance for floating point and Fr items
+                let tolerance = Abs::pt(0.1);
+                debug_assert!(
+                    (y - expected_consumed).abs() <= tolerance,
+                    "current_y mismatch: computed={:?}, expected={:?} (base={:?}, remaining={:?})",
+                    y,
+                    expected_consumed,
+                    base_y,
+                    remaining_y
+                );
+            }
+        }
+
+        y
     }
 
     /// Processes a float flush.

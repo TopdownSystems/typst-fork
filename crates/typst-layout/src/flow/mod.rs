@@ -33,7 +33,8 @@ use typst_utils::{NonZeroExt, Numeric, Protected};
 
 use self::block::{layout_multi_block, layout_single_block};
 use self::collect::{
-    Child, LineChild, MultiChild, MultiSpill, PlacedChild, SingleChild, collect,
+    Child, LineChild, MastheadChild, MultiChild, MultiSpill, ParChild, PlacedChild,
+    SingleChild, WrapChild, collect,
 };
 use self::compose::{Composer, compose};
 use self::distribute::distribute;
@@ -298,6 +299,10 @@ struct Work<'a, 'b> {
     spill: Option<MultiSpill<'a, 'b>>,
     /// Queued floats that didn't fit in previous regions.
     floats: EcoVec<&'b PlacedChild<'a>>,
+    /// Queued wraps that didn't fit in previous regions.
+    wraps: EcoVec<&'b WrapChild<'a>>,
+    /// Queued mastheads that didn't fit in previous regions.
+    mastheads: EcoVec<&'b MastheadChild<'a>>,
     /// Queued footnotes that didn't fit in previous regions.
     footnotes: EcoVec<Packed<FootnoteElem>>,
     /// Spilled frames of a footnote that didn't fully fit. Similar to `spill`.
@@ -317,6 +322,8 @@ impl<'a, 'b> Work<'a, 'b> {
             children,
             spill: None,
             floats: EcoVec::new(),
+            wraps: EcoVec::new(),
+            mastheads: EcoVec::new(),
             footnotes: EcoVec::new(),
             footnote_spill: None,
             tags: EcoVec::new(),
@@ -339,6 +346,8 @@ impl<'a, 'b> Work<'a, 'b> {
         self.children.is_empty()
             && self.spill.is_none()
             && self.floats.is_empty()
+            && self.wraps.is_empty()
+            && self.mastheads.is_empty()
             && self.footnote_spill.is_none()
             && self.footnotes.is_empty()
     }

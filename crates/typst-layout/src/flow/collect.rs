@@ -1,3 +1,10 @@
+//! Collection of flow elements into prepared children.
+//!
+//! This module pre-processes flow elements (paragraphs, blocks, wraps, etc.)
+//! into a uniform representation that is easier to lay out. When wrap or masthead
+//! elements are present, paragraphs use deferred layout to support variable-width
+//! line breaking around cutouts.
+
 use std::cell::{LazyCell, RefCell};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
@@ -13,12 +20,14 @@ use typst_library::introspection::{
     Introspector, Location, Locator, LocatorLink, SplitLocator, Tag, TagElem,
 };
 use typst_library::layout::{
-    Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, FixedAlignment, FlushElem,
-    Fr, Fragment, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem, PlacementScope,
-    Ratio, Region, Regions, Rel, Size, Sizing, Spacing, VElem,
+    Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, CutoutSide, FixedAlignment,
+    FlushElem, Fr, Fragment, Frame, FrameParent, Inherit, MastheadElem, PagebreakElem,
+    PlaceElem, PlacementScope, Ratio, Region, Regions, Rel, Size, Sizing, Spacing, VElem,
+    WrapElem,
 };
 use typst_library::model::ParElem;
 use typst_library::routines::{Pair, Routines};
+use typst_library::text::TextElem as TextElemModel;
 use typst_library::text::TextElem;
 use typst_utils::{Protected, SliceExt};
 
@@ -39,6 +48,12 @@ pub fn collect<'a>(
     expand: bool,
     mode: FlowMode,
 ) -> SourceResult<Vec<Child<'a>>> {
+    // Pre-scan to check if any wrap or masthead elements exist.
+    // If so, we use deferred paragraph layout so text can flow around cutouts.
+    let has_wraps = children
+        .iter()
+        .any(|(child, _)| child.is::<WrapElem>() || child.is::<MastheadElem>());
+
     Collector {
         engine,
         bump,
@@ -48,6 +63,7 @@ pub fn collect<'a>(
         expand,
         output: Vec::with_capacity(children.len()),
         par_situation: ParSituation::First,
+        use_deferred_par: has_wraps,
     }
     .run(mode)
 }
@@ -62,6 +78,8 @@ struct Collector<'a, 'x, 'y> {
     locator: SplitLocator<'a>,
     output: Vec<Child<'a>>,
     par_situation: ParSituation,
+    /// Whether to use deferred paragraph layout (when wraps are present).
+    use_deferred_par: bool,
 }
 
 impl<'a> Collector<'a, '_, '_> {
@@ -86,6 +104,10 @@ impl<'a> Collector<'a, '_, '_> {
                 self.block(elem, styles);
             } else if let Some(elem) = child.to_packed::<PlaceElem>() {
                 self.place(elem, styles)?;
+            } else if let Some(elem) = child.to_packed::<WrapElem>() {
+                self.wrap(elem, styles);
+            } else if let Some(elem) = child.to_packed::<MastheadElem>() {
+                self.masthead(elem, styles);
             } else if child.is::<FlushElem>() {
                 self.output.push(Child::Flush);
             } else if let Some(elem) = child.to_packed::<ColbreakElem>() {
@@ -153,34 +175,57 @@ impl<'a> Collector<'a, '_, '_> {
         });
     }
 
-    /// Collect a paragraph into [`LineChild`]ren. This already performs line
-    /// layout since it is not dependent on the concrete regions.
+    /// Collect a paragraph into [`LineChild`]ren or a [`ParChild`] for deferred layout.
+    ///
+    /// When wraps are present (`use_deferred_par` is true), we defer paragraph layout
+    /// to distribution time so text can flow around cutouts. Otherwise, we lay out
+    /// the paragraph immediately since it's not dependent on the concrete regions.
     fn par(
         &mut self,
         elem: &'a Packed<ParElem>,
         styles: StyleChain<'a>,
     ) -> SourceResult<()> {
-        let lines = crate::inline::layout_par(
-            elem,
-            self.engine,
-            self.locator.next(&elem.span()),
-            styles,
-            self.base,
-            self.expand,
-            self.par_situation,
-        )?
-        .into_frames();
-
         let spacing = elem.spacing.resolve(styles);
         let leading = elem.leading.resolve(styles);
 
-        self.output.push(Child::Rel(spacing.into(), 4));
+        if self.use_deferred_par {
+            // Defer paragraph layout to distribution time when cutouts are known.
+            let align = styles.resolve(AlignElem::alignment);
+            let costs = styles.get(TextElem::costs);
 
-        self.lines(lines, leading, styles);
+            let par_child = ParChild {
+                elem,
+                styles,
+                locator: self.locator.next(&elem.span()),
+                situation: self.par_situation,
+                base: self.base,
+                expand: self.expand,
+                spacing: spacing.into(),
+                leading,
+                align,
+                costs,
+            };
 
-        self.output.push(Child::Rel(spacing.into(), 4));
+            self.output.push(Child::Par(self.boxed(par_child)));
+        } else {
+            // Lay out immediately (original behavior for content without wraps).
+            let lines = crate::inline::layout_par(
+                elem,
+                self.engine,
+                self.locator.next(&elem.span()),
+                styles,
+                self.base,
+                self.expand,
+                self.par_situation,
+            )?
+            .into_frames();
+
+            self.output.push(Child::Rel(spacing.into(), 4));
+            self.lines(lines, leading, styles);
+            self.output.push(Child::Rel(spacing.into(), 4));
+        }
+
         self.par_situation = ParSituation::Consecutive;
-
         Ok(())
     }
 
@@ -333,6 +378,54 @@ impl<'a> Collector<'a, '_, '_> {
         Ok(())
     }
 
+    /// Collects a wrap element into a [`WrapChild`].
+    fn wrap(&mut self, elem: &'a Packed<WrapElem>, styles: StyleChain<'a>) {
+        let locator = self.locator.next(&elem.span());
+        let clearance = elem.clearance.resolve(styles);
+        let scope = elem.scope.get(styles);
+
+        // Get text direction to resolve logical sides to physical sides.
+        let dir = styles.resolve(TextElemModel::dir);
+        let side = elem.cutout_side(styles, dir);
+
+        self.output.push(Child::Wrap(self.boxed(WrapChild {
+            side,
+            scope,
+            clearance,
+            elem,
+            styles,
+            locator,
+            cell: CachedCell::new(),
+        })));
+
+        self.par_situation = ParSituation::Other;
+    }
+
+    /// Collects a masthead element into a [`MastheadChild`].
+    fn masthead(&mut self, elem: &'a Packed<MastheadElem>, styles: StyleChain<'a>) {
+        let locator = self.locator.next(&elem.span());
+        let clearance = elem.clearance.resolve(styles);
+        let scope = elem.scope.get(styles);
+        let width = elem.width.resolve(styles);
+
+        // Get text direction to resolve logical sides to physical sides.
+        let dir = styles.resolve(TextElemModel::dir);
+        let side = elem.cutout_side(styles, dir);
+
+        self.output.push(Child::Masthead(self.boxed(MastheadChild {
+            side,
+            scope,
+            clearance,
+            width,
+            elem,
+            styles,
+            locator,
+            cell: CachedCell::new(),
+        })));
+
+        self.par_situation = ParSituation::Other;
+    }
+
     /// Wraps a value in a bump-allocated box to reduce its footprint in the
     /// [`Child`] enum.
     fn boxed<T>(&self, value: T) -> BumpBox<'a, T> {
@@ -353,12 +446,22 @@ pub enum Child<'a> {
     Fr(Fr, u8),
     /// An already layouted line of a paragraph.
     Line(BumpBox<'a, LineChild>),
+    /// A paragraph that needs layout with cutout awareness.
+    ///
+    /// Unlike `Line`, this variant stores the paragraph element for deferred
+    /// layout during distribution, when the actual cutout positions are known.
+    /// This is used when wrap elements affect the paragraph's layout.
+    Par(BumpBox<'a, ParChild<'a>>),
     /// An unbreakable block.
     Single(BumpBox<'a, SingleChild<'a>>),
     /// A breakable block.
     Multi(BumpBox<'a, MultiChild<'a>>),
     /// An absolutely or floatingly placed element.
     Placed(BumpBox<'a, PlacedChild<'a>>),
+    /// A wrap element that text flows around.
+    Wrap(BumpBox<'a, WrapChild<'a>>),
+    /// A masthead element that creates a fixed-width column for text to flow around.
+    Masthead(BumpBox<'a, MastheadChild<'a>>),
     /// A place flush.
     Flush,
     /// An explicit column break.
@@ -371,6 +474,68 @@ pub struct LineChild {
     pub frame: Frame,
     pub align: Axes<FixedAlignment>,
     pub need: Abs,
+}
+
+/// A child that encapsulates a paragraph for deferred layout.
+///
+/// This is used when wrap elements may affect the paragraph's layout.
+/// The paragraph is laid out during distribution when the cutout
+/// positions are known, rather than during collection.
+#[derive(Debug)]
+pub struct ParChild<'a> {
+    /// The paragraph element to layout.
+    pub elem: &'a Packed<ParElem>,
+    /// The styles to use for layout.
+    pub styles: StyleChain<'a>,
+    /// The locator for introspection.
+    pub locator: Locator<'a>,
+    /// The paragraph situation (first, consecutive, other).
+    pub situation: crate::inline::ParSituation,
+    /// The base size for layout.
+    pub base: Size,
+    /// Whether to expand horizontally.
+    pub expand: bool,
+    /// Spacing before and after the paragraph.
+    pub spacing: Rel<Abs>,
+    /// Leading between lines.
+    pub leading: Abs,
+    /// Text alignment.
+    pub align: Axes<FixedAlignment>,
+    /// Costs for widow/orphan prevention.
+    pub costs: typst_library::text::Costs,
+}
+
+impl<'a> ParChild<'a> {
+    /// Layout the paragraph with optional cutout information.
+    ///
+    /// If cutouts are provided and affect this paragraph's position,
+    /// the lines will be broken with variable widths to flow around them.
+    pub fn layout(
+        &self,
+        engine: &mut Engine,
+        cutouts: &[typst_library::layout::RegionCutout],
+        y_offset: Abs,
+    ) -> SourceResult<Vec<Frame>> {
+        use crate::inline::{InlineContext, layout_par_with_context};
+
+        let context = if cutouts.is_empty() {
+            None
+        } else {
+            Some(InlineContext::new(cutouts, y_offset))
+        };
+
+        layout_par_with_context(
+            self.elem,
+            engine,
+            self.locator.track(),
+            self.styles,
+            self.base,
+            self.expand,
+            self.situation,
+            context.as_ref(),
+        )
+        .map(|fragment| fragment.into_frames())
+    }
 }
 
 /// A child that encapsulates a prepared unbreakable block.
@@ -657,6 +822,118 @@ impl PlacedChild<'_> {
                     Inherit::Yes,
                 ));
             }
+
+            Ok(frame)
+        })
+    }
+
+    /// The element's location.
+    pub fn location(&self) -> Location {
+        self.elem.location().unwrap()
+    }
+}
+
+/// A child that encapsulates a prepared wrap element.
+///
+/// Wrap elements create cutout regions that text flows around.
+#[derive(Debug)]
+pub struct WrapChild<'a> {
+    /// Which side the wrap content appears on (logical Start/End).
+    pub side: CutoutSide,
+    /// The scope of the wrap (column or parent).
+    pub scope: PlacementScope,
+    /// The clearance between wrap content and flowing text.
+    pub clearance: Abs,
+    /// The wrap element itself.
+    elem: &'a Packed<WrapElem>,
+    /// The styles applicable to this wrap.
+    styles: StyleChain<'a>,
+    /// The locator for this wrap element.
+    locator: Locator<'a>,
+    /// Cached layout result.
+    cell: CachedCell<SourceResult<Frame>>,
+}
+
+impl WrapChild<'_> {
+    /// Build the child's frame given the region's base size.
+    pub fn layout(&self, engine: &mut Engine, base: Size) -> SourceResult<Frame> {
+        self.cell.get_or_init(base, |base| {
+            let mut frame = layout_and_modify(self.styles, |styles| {
+                crate::layout_frame(
+                    engine,
+                    &self.elem.body,
+                    self.locator.relayout(),
+                    styles,
+                    Region::new(base, Axes::splat(false)),
+                )
+            })?;
+
+            // Set parent for introspection linking.
+            frame.set_parent(FrameParent::new(
+                self.elem.location().unwrap(),
+                Inherit::Yes,
+            ));
+
+            Ok(frame)
+        })
+    }
+
+    /// The element's location.
+    pub fn location(&self) -> Location {
+        self.elem.location().unwrap()
+    }
+}
+
+/// A child that encapsulates a prepared masthead element.
+///
+/// Masthead elements create fixed-width cutout regions that text flows around.
+/// Unlike wrap elements which derive width from their body content, mastheads
+/// have an explicit width parameter.
+#[derive(Debug)]
+pub struct MastheadChild<'a> {
+    /// Which side the masthead content appears on (logical Start/End).
+    pub side: CutoutSide,
+    /// The scope of the masthead (column or parent).
+    pub scope: PlacementScope,
+    /// The clearance between masthead content and flowing text.
+    pub clearance: Abs,
+    /// The explicit width of the masthead column.
+    pub width: Abs,
+    /// The masthead element itself.
+    elem: &'a Packed<MastheadElem>,
+    /// The styles applicable to this masthead.
+    styles: StyleChain<'a>,
+    /// The locator for this masthead element.
+    locator: Locator<'a>,
+    /// Cached layout result.
+    cell: CachedCell<SourceResult<Frame>>,
+}
+
+impl MastheadChild<'_> {
+    /// Build the child's frame given the region's base size.
+    ///
+    /// Unlike WrapChild, the masthead uses its explicit width parameter
+    /// to constrain the body content.
+    pub fn layout(&self, engine: &mut Engine, base: Size) -> SourceResult<Frame> {
+        self.cell.get_or_init(base, |base| {
+            // Use the explicit width for the masthead region
+            let masthead_base = Size::new(self.width, base.y);
+
+            let mut frame = layout_and_modify(self.styles, |styles| {
+                crate::layout_frame(
+                    engine,
+                    &self.elem.body,
+                    self.locator.relayout(),
+                    styles,
+                    Region::new(masthead_base, Axes::splat(false)),
+                )
+            })?;
+
+            // Set parent for introspection linking.
+            frame.set_parent(FrameParent::new(
+                self.elem.location().unwrap(),
+                Inherit::Yes,
+            ));
 
             Ok(frame)
         })

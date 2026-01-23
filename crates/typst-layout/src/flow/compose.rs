@@ -1,3 +1,9 @@
+//! Composition of flow content into pages and columns.
+//!
+//! The composer handles out-of-flow insertions (floats, footnotes, wraps, mastheads)
+//! and manages region cutouts that affect text flow. It coordinates with the
+//! distributor to lay out in-flow content within the available space.
+
 use std::num::NonZeroUsize;
 
 use typst_library::diag::SourceResult;
@@ -9,7 +15,7 @@ use typst_library::introspection::{
 };
 use typst_library::layout::{
     Abs, Axes, Dir, FixedAlignment, Fragment, Frame, FrameItem, FrameParent, Inherit,
-    OuterHAlignment, PlacementScope, Point, Region, Regions, Rel, Size,
+    OuterHAlignment, PlacementScope, Point, Region, RegionCutout, Regions, Rel, Size,
 };
 use typst_library::model::{
     FootnoteElem, FootnoteEntry, LineNumberingScope, Numbering, ParLineMarker,
@@ -18,7 +24,8 @@ use typst_syntax::Span;
 use typst_utils::{NonZeroExt, Numeric};
 
 use super::{
-    Config, FlowMode, FlowResult, LineNumberConfig, PlacedChild, Stop, Work, distribute,
+    Config, FlowMode, FlowResult, LineNumberConfig, MastheadChild, PlacedChild, Stop, Work,
+    WrapChild, distribute,
 };
 
 /// Composes the contents of a single page/region. A region can have multiple
@@ -45,6 +52,7 @@ pub fn compose(
         column: 0,
         page_insertions: Insertions::default(),
         column_insertions: Insertions::default(),
+        column_cutouts: vec![],
         work,
         footnote_spill: None,
         footnote_queue: vec![],
@@ -68,6 +76,8 @@ pub struct Composer<'a, 'b, 'x, 'y> {
     page_base: Size,
     page_insertions: Insertions<'a, 'b>,
     column_insertions: Insertions<'a, 'b>,
+    /// Active cutouts for the current column created by wrap elements.
+    pub column_cutouts: Vec<RegionCutout>,
     // These are here because they have to survive relayout (we could lose the
     // footnotes otherwise). For floats, we revisit them anyway, so it's okay to
     // use `work.floats` directly. This is not super clean; probably there's a
@@ -163,8 +173,9 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
 
     /// Lay out a column, including column insertions.
     fn column(&mut self, locator: Locator, regions: Regions) -> FlowResult<Frame> {
-        // Reset column insertion when starting a new column.
+        // Reset column insertion and cutouts when starting a new column.
         self.column_insertions = Insertions::default();
+        self.column_cutouts.clear();
 
         // Process footnote spill.
         if let Some(spill) = self.work.footnote_spill.take() {
@@ -217,12 +228,12 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
 
     /// Lay out the inner contents of a column.
     ///
-    /// Pending floats and footnotes are also laid out at this step. For those,
-    /// however, we forbid footnote migration (moving the frame containing the
-    /// footnote reference if the corresponding entry doesn't fit), allowing
-    /// the footnote invariant to be broken, as it would require handling a
-    /// [`Stop::Finish`] at this point, but that is exclusively handled by the
-    /// distributor.
+    /// Pending floats, wraps, and footnotes are also laid out at this step.
+    /// For those, however, we forbid footnote migration (moving the frame
+    /// containing the footnote reference if the corresponding entry doesn't
+    /// fit), allowing the footnote invariant to be broken, as it would require
+    /// handling a [`Stop::Finish`] at this point, but that is exclusively
+    /// handled by the distributor.
     fn column_contents(&mut self, regions: Regions) -> FlowResult<Frame> {
         // Process pending footnotes.
         for note in std::mem::take(&mut self.work.footnotes) {
@@ -232,6 +243,12 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         // Process pending floats.
         for placed in std::mem::take(&mut self.work.floats) {
             self.float(placed, &regions, false, false)?;
+        }
+
+        // Process pending wraps.
+        for wrap in std::mem::take(&mut self.work.wraps) {
+            // Wraps at start of region begin at y=0.
+            self.wrap(wrap, &regions, Abs::zero(), false)?;
         }
 
         distribute(self, regions)
@@ -334,6 +351,188 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
 
         // Trigger relayout.
         Err(Stop::Relayout(placed.scope))
+    }
+
+    /// Lays out a wrap element and creates a cutout for text to flow around.
+    ///
+    /// This is called from within [`distribute`]. When the wrap fits, this
+    /// returns an `Err(Stop::Relayout(..))`, which bubbles all the way through
+    /// distribution and is handled in [`Self::column`].
+    ///
+    /// When the wrap does not fit, it is queued into `work.wraps`. The
+    /// value of `clearance` indicates whether space between the wrap and flow
+    /// content is needed --- it is set if there are already distributed items.
+    pub fn wrap(
+        &mut self,
+        wrap: &'b WrapChild<'a>,
+        regions: &Regions,
+        current_y: Abs,
+        clearance: bool,
+    ) -> FlowResult<()> {
+        // If the wrap is already processed, skip it.
+        let loc = wrap.location();
+        if self.skipped(loc) {
+            return Ok(());
+        }
+
+        // If there is already a queued wrap, queue this one as well. We
+        // don't want to disrupt the order.
+        if !self.work.wraps.is_empty() {
+            self.work.wraps.push(wrap);
+            return Ok(());
+        }
+
+        // Determine the base size of the chosen scope.
+        let base = match wrap.scope {
+            PlacementScope::Column => regions.base(),
+            PlacementScope::Parent => self.page_base,
+        };
+
+        // Lay out the wrap content.
+        let frame = wrap.layout(self.engine, base)?;
+
+        // Determine the remaining space in the scope.
+        let remaining = match wrap.scope {
+            PlacementScope::Column => regions.size.y,
+            PlacementScope::Parent => {
+                let remaining: Abs = regions
+                    .iter()
+                    .map(|size| size.y)
+                    .take(self.config.columns.count - self.column)
+                    .sum();
+                remaining / self.config.columns.count as f64
+            }
+        };
+
+        // We only require clearance if there is other content.
+        let clearance_amount = if clearance { wrap.clearance } else { Abs::zero() };
+        let need = frame.height() + clearance_amount;
+
+        // If the wrap doesn't fit, queue it for the next region.
+        if !remaining.fits(need) && regions.may_progress() {
+            self.work.wraps.push(wrap);
+            return Ok(());
+        }
+
+        // Create a cutout for the wrap content.
+        let cutout = RegionCutout::new(
+            current_y,
+            current_y + frame.height(),
+            wrap.side,
+            frame.width(),
+            wrap.clearance,
+        );
+
+        // Add to active cutouts.
+        self.column_cutouts.push(cutout);
+
+        // Select the insertion area where we'll put this wrap's frame.
+        // Wraps are always positioned at their flow position (like floats with
+        // align_y based on current position).
+        let area = match wrap.scope {
+            PlacementScope::Column => &mut self.column_insertions,
+            PlacementScope::Parent => &mut self.page_insertions,
+        };
+
+        // Determine horizontal alignment based on cutout side.
+        let align_x = match wrap.side {
+            typst_library::layout::CutoutSide::Start => FixedAlignment::Start,
+            typst_library::layout::CutoutSide::End => FixedAlignment::End,
+        };
+
+        // Put the wrap frame there (at current vertical position).
+        area.push_wrap(wrap, frame, align_x, current_y);
+        area.skips.push(loc);
+
+        // Trigger relayout so text flows around the cutout.
+        Err(Stop::Relayout(wrap.scope))
+    }
+
+    /// Processes a masthead element, creating a cutout region with explicit width.
+    ///
+    /// Mastheads work like wraps but use an explicit width parameter for the
+    /// cutout instead of deriving it from the body content.
+    pub fn masthead(
+        &mut self,
+        masthead: &'b MastheadChild<'a>,
+        regions: &Regions,
+        current_y: Abs,
+        clearance: bool,
+    ) -> FlowResult<()> {
+        // If the masthead is already processed, skip it.
+        let loc = masthead.location();
+        if self.skipped(loc) {
+            return Ok(());
+        }
+
+        // If there is already a queued masthead, queue this one as well.
+        if !self.work.mastheads.is_empty() {
+            self.work.mastheads.push(masthead);
+            return Ok(());
+        }
+
+        // Determine the base size of the chosen scope.
+        let base = match masthead.scope {
+            PlacementScope::Column => regions.base(),
+            PlacementScope::Parent => self.page_base,
+        };
+
+        // Lay out the masthead content with explicit width.
+        let frame = masthead.layout(self.engine, base)?;
+
+        // Determine the remaining space in the scope.
+        let remaining = match masthead.scope {
+            PlacementScope::Column => regions.size.y,
+            PlacementScope::Parent => {
+                let remaining: Abs = regions
+                    .iter()
+                    .map(|size| size.y)
+                    .take(self.config.columns.count - self.column)
+                    .sum();
+                remaining / self.config.columns.count as f64
+            }
+        };
+
+        // We only require clearance if there is other content.
+        let clearance_amount = if clearance { masthead.clearance } else { Abs::zero() };
+        let need = frame.height() + clearance_amount;
+
+        // If the masthead doesn't fit, queue it for the next region.
+        if !remaining.fits(need) && regions.may_progress() {
+            self.work.mastheads.push(masthead);
+            return Ok(());
+        }
+
+        // Create a cutout using the explicit width from the masthead.
+        let cutout = RegionCutout::new(
+            current_y,
+            current_y + frame.height(),
+            masthead.side,
+            masthead.width, // Use explicit width, not frame.width()
+            masthead.clearance,
+        );
+
+        // Add to active cutouts.
+        self.column_cutouts.push(cutout);
+
+        // Select the insertion area where we'll put this masthead's frame.
+        let area = match masthead.scope {
+            PlacementScope::Column => &mut self.column_insertions,
+            PlacementScope::Parent => &mut self.page_insertions,
+        };
+
+        // Determine horizontal alignment based on cutout side.
+        let align_x = match masthead.side {
+            typst_library::layout::CutoutSide::Start => FixedAlignment::Start,
+            typst_library::layout::CutoutSide::End => FixedAlignment::End,
+        };
+
+        // Put the masthead frame there (at current vertical position).
+        area.push_masthead(masthead, frame, align_x, current_y);
+        area.skips.push(loc);
+
+        // Trigger relayout so text flows around the cutout.
+        Err(Stop::Relayout(masthead.scope))
     }
 
     /// Lays out footnotes in the `frame` if this is the root flow and there are
@@ -624,6 +823,10 @@ fn layout_footnote(
 struct Insertions<'a, 'b> {
     top_floats: Vec<(&'b PlacedChild<'a>, Frame)>,
     bottom_floats: Vec<(&'b PlacedChild<'a>, Frame)>,
+    /// Wrap elements with their frames, alignment, and y position.
+    wraps: Vec<(&'b WrapChild<'a>, Frame, FixedAlignment, Abs)>,
+    /// Masthead elements with their frames, alignment, and y position.
+    mastheads: Vec<(&'b MastheadChild<'a>, Frame, FixedAlignment, Abs)>,
     footnotes: Vec<Frame>,
     footnote_separator: Option<Frame>,
     top_size: Abs,
@@ -654,6 +857,37 @@ impl<'a, 'b> Insertions<'a, 'b> {
         }
     }
 
+    /// Add a wrap element at a specific position.
+    ///
+    /// Unlike floats which go to top or bottom, wraps are positioned inline
+    /// at their flow position.
+    fn push_wrap(
+        &mut self,
+        wrap: &'b WrapChild<'a>,
+        frame: Frame,
+        align_x: FixedAlignment,
+        y: Abs,
+    ) {
+        self.width.set_max(frame.width());
+        // Note: wraps don't add to top_size or bottom_size because they're
+        // positioned inline, not at the edges.
+        self.wraps.push((wrap, frame, align_x, y));
+    }
+
+    /// Add a masthead insertion to the area.
+    fn push_masthead(
+        &mut self,
+        masthead: &'b MastheadChild<'a>,
+        frame: Frame,
+        align_x: FixedAlignment,
+        y: Abs,
+    ) {
+        self.width.set_max(frame.width());
+        // Note: mastheads don't add to top_size or bottom_size because they're
+        // positioned inline, not at the edges.
+        self.mastheads.push((masthead, frame, align_x, y));
+    }
+
     /// Add a footnote to the bottom area.
     fn push_footnote(&mut self, config: &Config, frame: Frame) {
         self.width.set_max(frame.width());
@@ -682,6 +916,8 @@ impl<'a, 'b> Insertions<'a, 'b> {
 
         if self.top_floats.is_empty()
             && self.bottom_floats.is_empty()
+            && self.wraps.is_empty()
+            && self.mastheads.is_empty()
             && self.footnote_separator.is_none()
             && self.footnotes.is_empty()
         {
@@ -703,6 +939,24 @@ impl<'a, 'b> Insertions<'a, 'b> {
         }
 
         output.push_frame(Point::with_y(self.top_size), inner);
+
+        // Place wrap elements at their flow positions.
+        // Wraps are positioned at the side (start or end) at their y position.
+        for (_wrap, frame, align_x, y) in self.wraps {
+            let x = align_x.position(size.x - frame.width());
+            // Adjust y by top insertions offset.
+            let pos = Point::new(x, y + self.top_size);
+            output.push_frame(pos, frame);
+        }
+
+        // Place masthead elements at their flow positions.
+        // Mastheads are positioned similarly to wraps.
+        for (_masthead, frame, align_x, y) in self.mastheads {
+            let x = align_x.position(size.x - frame.width());
+            // Adjust y by top insertions offset.
+            let pos = Point::new(x, y + self.top_size);
+            output.push_frame(pos, frame);
+        }
 
         // We put floats first and then footnotes. This differs from what LaTeX
         // does and is a little inconsistent w.r.t column vs page floats (page

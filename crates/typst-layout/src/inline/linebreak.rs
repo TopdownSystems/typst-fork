@@ -1,3 +1,9 @@
+//! Line breaking algorithms for text layout.
+//!
+//! This module implements both simple (greedy) and optimized (Knuth-Plass inspired)
+//! line breaking. It supports variable-width lines through the [`WidthProvider`] trait,
+//! enabling text to flow around cutouts from wrap elements.
+
 use std::ops::{Add, Sub};
 use std::sync::LazyLock;
 
@@ -16,6 +22,7 @@ use typst_syntax::link_prefix;
 use typst_utils::Scalar;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::width_provider::{FixedWidth, WidthProvider};
 use super::*;
 
 /// The cost of a line or inline layout.
@@ -140,14 +147,35 @@ impl Trim {
 }
 
 /// Breaks the text into lines.
+///
+/// This is the main entry point for line breaking with a fixed width.
+/// For variable-width line breaking (with cutouts), use [`linebreak_with_provider`].
 pub fn linebreak<'a>(
     engine: &Engine,
     p: &'a Preparation<'a>,
     width: Abs,
 ) -> Vec<Line<'a>> {
+    linebreak_with_provider(engine, p, &FixedWidth::new(width))
+}
+
+/// Breaks the text into lines using a width provider.
+///
+/// This enables variable-width line breaking where the available width
+/// can vary at different vertical positions (e.g., for text flowing
+/// around cutouts/images).
+///
+/// The width provider is queried at each line's cumulative height to
+/// determine the available width for that line.
+pub fn linebreak_with_provider<'a>(
+    engine: &Engine,
+    p: &'a Preparation<'a>,
+    width_provider: &dyn WidthProvider,
+) -> Vec<Line<'a>> {
     match p.config.linebreaks {
-        Linebreaks::Simple => linebreak_simple(engine, p, width),
-        Linebreaks::Optimized => linebreak_optimized(engine, p, width),
+        Linebreaks::Simple => linebreak_simple_with_provider(engine, p, width_provider),
+        Linebreaks::Optimized => {
+            linebreak_optimized_with_provider(engine, p, width_provider)
+        }
     }
 }
 
@@ -155,57 +183,125 @@ pub fn linebreak<'a>(
 /// lines greedily, always taking the longest possible line. This may lead to
 /// very unbalanced line, but is fast and simple.
 #[typst_macros::time]
-fn linebreak_simple<'a>(
+fn linebreak_simple_with_provider<'a>(
     engine: &Engine,
     p: &'a Preparation<'a>,
-    width: Abs,
+    width_provider: &dyn WidthProvider,
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::with_capacity(16);
     let mut start = 0;
     let mut last = None;
+    let mut cumulative_height = Abs::zero();
 
     breakpoints(p, |end, breakpoint| {
+        // Query available width at current cumulative height.
+        let width_info = width_provider.width_at(cumulative_height);
+        let width = width_info.available;
+
         // Compute the line and its size.
         let mut attempt = line(engine, p, start..end, breakpoint, lines.last());
+
+        // Store the start offset for this line (for cutout avoidance).
+        attempt.x_offset = width_info.start_offset;
 
         // If the line doesn't fit anymore, we push the last fitting attempt
         // into the stack and rebuild the line from the attempt's end. The
         // resulting line cannot be broken up further.
         if !width.fits(attempt.width)
-            && let Some((last_attempt, last_end)) = last.take()
+            && let Some((last_attempt, last_end, last_height)) = last.take()
         {
+            cumulative_height = last_height;
             lines.push(last_attempt);
             start = last_end;
+
+            // Re-query width at the new cumulative height after pushing previous line.
+            let new_width_info = width_provider.width_at(cumulative_height);
             attempt = line(engine, p, start..end, breakpoint, lines.last());
+            attempt.x_offset = new_width_info.start_offset;
         }
 
         // Finish the current line if there is a mandatory line break (i.e. due
         // to "\n") or if the line doesn't fit horizontally already since then
         // no shorter line will be possible.
         if breakpoint == Breakpoint::Mandatory || !width.fits(attempt.width) {
+            // Estimate line height for cumulative tracking.
+            // We use a simple estimate based on font size for now.
+            let line_height = estimate_line_height(p, &attempt);
+            cumulative_height += line_height;
             lines.push(attempt);
             start = end;
             last = None;
         } else {
-            last = Some((attempt, end));
+            // Store the cumulative height at the point where this line would end.
+            let line_height = estimate_line_height(p, &attempt);
+            last = Some((attempt, end, cumulative_height + line_height));
         }
     });
 
-    if let Some((line, _)) = last {
+    if let Some((line, _, _)) = last {
         lines.push(line);
     }
 
     lines
 }
 
-/// Performs line breaking in optimized Knuth-Plass style. Here, we use more
-/// context to determine the line breaks than in the simple first-fit style. For
-/// example, we might choose to cut a line short even though there is still a
-/// bit of space to improve the fit of one of the following lines. The
-/// Knuth-Plass algorithm is based on the idea of "cost". A line which has a
-/// very tight or very loose fit has a higher cost than one that is just right.
-/// Ending a line with a hyphen incurs extra cost and endings two successive
-/// lines with hyphens even more.
+/// Estimate the height of a line for cumulative height tracking.
+///
+/// This is a simplified estimate used during line breaking to track
+/// vertical progress. The actual line height is determined precisely
+/// during frame building.
+///
+/// # Line Height Factor (1.2)
+///
+/// The 1.2 multiplier is a common default line-height ratio that accounts for:
+/// - The font's ascender and descender heights
+/// - Inter-line leading (spacing between baselines)
+///
+/// This approximation is sufficient for width queries at different heights
+/// during cutout avoidance. A more accurate estimate would require measuring
+/// the actual line contents, but that would add complexity without significant
+/// benefit since the cutout system tolerates small height estimation errors.
+fn estimate_line_height(p: &Preparation, _line: &Line) -> Abs {
+    // The 1.2 factor is a standard typographic ratio for single-spaced text.
+    // See doc comment above for rationale.
+    p.config.font_size * 1.2
+}
+
+/// Performs line breaking in optimized Knuth-Plass style with a width provider.
+///
+/// When the width is constant (no cutouts), delegates to the full Knuth-Plass
+/// optimization. When width varies, falls back to the simple algorithm as the
+/// Knuth-Plass algorithm assumes constant width.
+///
+/// Future optimization: Extend Knuth-Plass to handle variable widths by
+/// tracking cumulative height in the DP table entries.
+#[typst_macros::time]
+fn linebreak_optimized_with_provider<'a>(
+    engine: &Engine,
+    p: &'a Preparation<'a>,
+    width_provider: &dyn WidthProvider,
+) -> Vec<Line<'a>> {
+    // For variable-width (cutouts present), fall back to simple algorithm.
+    // The Knuth-Plass algorithm assumes constant width and would need
+    // significant modifications to handle variable widths correctly.
+    if !width_provider.is_constant() {
+        return linebreak_simple_with_provider(engine, p, width_provider);
+    }
+
+    // Constant width: use full Knuth-Plass optimization.
+    let width = width_provider.base_width();
+    linebreak_optimized_fixed(engine, p, width)
+}
+
+/// Performs line breaking in optimized Knuth-Plass style with fixed width.
+///
+/// Here, we use more context to determine the line breaks than in the simple
+/// first-fit style. For example, we might choose to cut a line short even
+/// though there is still a bit of space to improve the fit of one of the
+/// following lines. The Knuth-Plass algorithm is based on the idea of "cost".
+/// A line which has a very tight or very loose fit has a higher cost than one
+/// that is just right. Ending a line with a hyphen incurs extra cost and
+/// endings two successive lines with hyphens even more.
 ///
 /// To find the layout with the minimal total cost the algorithm uses dynamic
 /// programming: For each possible breakpoint, it determines the optimal layout
@@ -215,7 +311,7 @@ fn linebreak_simple<'a>(
 /// stored in dynamic programming table) is minimal. The final result is simply
 /// the layout determined for the last breakpoint at the end of text.
 #[typst_macros::time]
-fn linebreak_optimized<'a>(
+fn linebreak_optimized_fixed<'a>(
     engine: &Engine,
     p: &'a Preparation<'a>,
     width: Abs,
