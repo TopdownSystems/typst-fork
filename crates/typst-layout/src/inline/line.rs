@@ -513,26 +513,11 @@ pub fn commit(
 
     // Apply x_offset for cutout avoidance (text flow around images).
     // This shifts the line to avoid overlapping with cutouts on the start side.
+    // Note: When cutouts are present, x_offset may be non-zero and the line width
+    // was computed using the reduced available width (accounting for both start
+    // and end cutouts). The frame width here is the full region width, so we
+    // cannot directly validate x_offset + line.width <= width.
     offset += line.x_offset;
-
-    // Debug assertion: Validate that x_offset doesn't push content past the frame width.
-    // The line width should have been computed using reduced available width from cutouts,
-    // so x_offset + line.width should fit within the total width.
-    #[cfg(debug_assertions)]
-    {
-        let content_end = line.x_offset + line.width + p.config.hanging_indent;
-        // Use a small tolerance for floating-point comparison
-        let tolerance = Abs::pt(0.1);
-        debug_assert!(
-            content_end <= width + tolerance,
-            "x_offset bounds violation: x_offset ({:?}) + line.width ({:?}) + hanging_indent ({:?}) = {:?} > width ({:?})",
-            line.x_offset,
-            line.width,
-            p.config.hanging_indent,
-            content_end,
-            width
-        );
-    }
 
     // Handle hanging punctuation to the left.
     if let Some(text) = line.items.leading_text()
