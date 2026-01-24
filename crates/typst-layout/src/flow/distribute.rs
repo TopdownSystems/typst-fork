@@ -14,7 +14,7 @@ use typst_utils::Numeric;
 
 use super::{
     Child, Composer, FlowResult, LineChild, MastheadChild, MultiChild, MultiSpill, ParChild,
-    PlacedChild, SingleChild, Stop, Work, WrapChild,
+    ParSpill, PlacedChild, SingleChild, Stop, Work, WrapChild,
 };
 
 /// Distributes as many children as fit from `composer.work` into the first
@@ -116,6 +116,11 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // First, handle spill of a breakable block.
         if let Some(spill) = self.composer.work.spill.take() {
             self.multi_spill(spill)?;
+        }
+
+        // Handle spill of a deferred paragraph.
+        if let Some(spill) = self.composer.work.par_spill.take() {
+            self.par_spill(spill)?;
         }
 
         // If spill are taken care of, process children until no space is left
@@ -322,66 +327,17 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         let spacing = par.spacing.relative_to(self.regions.base().y);
         self.rel(spacing.into(), 4);
 
-        // Determine whether to prevent widows and orphans, same as in collect.rs
-        let len = frames.len();
-        let costs = par.costs;
-        let prevent_orphans =
-            costs.orphan() > Ratio::zero() && len >= 2 && !frames[1].is_empty();
-        let prevent_widows = costs.widow() > Ratio::zero()
-            && len >= 2
-            && !frames[len.saturating_sub(2)].is_empty();
-        let prevent_all = len == 3 && prevent_orphans && prevent_widows;
-
-        // Store the heights of lines at the edges for need computation
-        let height_at = |i: usize| frames.get(i).map(Frame::height).unwrap_or_default();
-        let front_1 = height_at(0);
-        let front_2 = height_at(1);
-        let back_2 = height_at(len.saturating_sub(2));
-        let back_1 = height_at(len.saturating_sub(1));
-        let leading = par.leading;
-
-        // Process each line, similar to how pre-laid-out lines are handled
-        for (i, frame) in frames.into_iter().enumerate() {
-            if i > 0 {
-                // Add leading between lines
-                self.rel(leading.into(), 5);
-            }
-
-            // Compute `need` for widow/orphan prevention (same logic as collect.rs)
-            let need = if prevent_all && i == 0 {
-                front_1 + leading + front_2 + leading + back_1
-            } else if prevent_orphans && i == 0 {
-                front_1 + leading + front_2
-            } else if prevent_widows && i >= 2 && i + 2 == len {
-                back_2 + leading + back_1
-            } else {
-                frame.height()
-            };
-
-            // Check if the line fits (basic height check)
-            if !self.regions.size.y.fits(frame.height()) && self.regions.may_progress() {
-                return Err(Stop::Finish(false));
-            }
-
-            // Check if the line's need (including widow/orphan requirements) fits
-            // If it doesn't fit here but would fit in the next region, finish this region
-            if !self.regions.size.y.fits(need)
-                && self
-                    .regions
-                    .iter()
-                    .nth(1)
-                    .is_some_and(|region| region.y.fits(need))
-            {
-                return Err(Stop::Finish(false));
-            }
-
-            self.frame(frame, par.align, false, false)?;
-        }
-
-        // Add spacing after the paragraph
-        self.rel(spacing.into(), 4);
-
-        Ok(())
+        // Process lines using the common helper, which handles spilling.
+        // Note: spacing after paragraph is added by process_par_lines.
+        // Pass `true` for `advance_on_spill` since this is a new paragraph.
+        self.process_par_lines(
+            frames,
+            par.align,
+            par.leading,
+            par.costs,
+            par.spacing,
+            true, // advance the child when spilling
+        )
     }
 
     /// Processes an unbreakable block.
@@ -462,6 +418,133 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             self.composer.work.spill = Some(spill);
             return Err(Stop::Finish(false));
         }
+
+        Ok(())
+    }
+
+    /// Processes spillover from a deferred paragraph.
+    fn par_spill(&mut self, spill: ParSpill) -> FlowResult<()> {
+        // Skip directly if the region is already (over)full.
+        if self.regions.is_full() {
+            self.composer.work.par_spill = Some(spill);
+            return Err(Stop::Finish(false));
+        }
+
+        // Process the remaining lines.
+        // Pass `false` for `advance_on_spill` since the child was already advanced.
+        self.process_par_lines(
+            spill.frames,
+            spill.align,
+            spill.leading,
+            spill.costs,
+            spill.spacing,
+            false, // don't advance - already done
+        )
+    }
+
+    /// Common helper to process paragraph lines, handling spilling when needed.
+    ///
+    /// This is used by both `par()` for new paragraphs and `par_spill()` for
+    /// continuing paragraphs that broke across regions.
+    ///
+    /// The `advance_on_spill` parameter controls whether to call `advance()` on
+    /// the work queue when spilling. This should be `true` when called from
+    /// `par()` (to mark the Par child as processed) and `false` when called
+    /// from `par_spill()` (since the child was already advanced).
+    fn process_par_lines(
+        &mut self,
+        frames: Vec<Frame>,
+        align: Axes<FixedAlignment>,
+        leading: Abs,
+        costs: typst_library::text::Costs,
+        spacing: Rel<Abs>,
+        advance_on_spill: bool,
+    ) -> FlowResult<()> {
+        // Determine whether to prevent widows and orphans
+        let len = frames.len();
+        let prevent_orphans =
+            costs.orphan() > Ratio::zero() && len >= 2 && frames.get(1).map_or(false, |f| !f.is_empty());
+        let prevent_widows = costs.widow() > Ratio::zero()
+            && len >= 2
+            && frames.get(len.saturating_sub(2)).map_or(false, |f| !f.is_empty());
+        let prevent_all = len == 3 && prevent_orphans && prevent_widows;
+
+        // Store the heights of lines at the edges for need computation
+        let height_at = |frames: &[Frame], i: usize| frames.get(i).map(Frame::height).unwrap_or_default();
+        let front_1 = height_at(&frames, 0);
+        let front_2 = height_at(&frames, 1);
+        let back_2 = height_at(&frames, len.saturating_sub(2));
+        let back_1 = height_at(&frames, len.saturating_sub(1));
+
+        // Convert to iterator so we can collect remaining frames on spill
+        let mut frames_iter = frames.into_iter().enumerate().peekable();
+
+        while let Some((i, frame)) = frames_iter.next() {
+            if i > 0 {
+                // Add leading between lines
+                self.rel(leading.into(), 5);
+            }
+
+            // Compute `need` for widow/orphan prevention (same logic as collect.rs)
+            let need = if prevent_all && i == 0 {
+                front_1 + leading + front_2 + leading + back_1
+            } else if prevent_orphans && i == 0 {
+                front_1 + leading + front_2
+            } else if prevent_widows && i >= 2 && i + 2 == len {
+                back_2 + leading + back_1
+            } else {
+                frame.height()
+            };
+
+            // Check if the line fits (basic height check)
+            if !self.regions.size.y.fits(frame.height()) && self.regions.may_progress() {
+                // Save remaining lines (including current one) as spill
+                let mut remaining: Vec<Frame> = vec![frame];
+                remaining.extend(frames_iter.map(|(_, f)| f));
+                self.composer.work.par_spill = Some(ParSpill {
+                    frames: remaining,
+                    align,
+                    leading,
+                    costs,
+                    spacing,
+                });
+                if advance_on_spill {
+                    self.composer.work.advance();
+                }
+                return Err(Stop::Finish(false));
+            }
+
+            // Check if the line's need (including widow/orphan requirements) fits
+            // If it doesn't fit here but would fit in the next region, finish this region
+            if !self.regions.size.y.fits(need)
+                && self
+                    .regions
+                    .iter()
+                    .nth(1)
+                    .is_some_and(|region| region.y.fits(need))
+            {
+                // Save remaining lines (including current one) as spill
+                let mut remaining: Vec<Frame> = vec![frame];
+                remaining.extend(frames_iter.map(|(_, f)| f));
+                self.composer.work.par_spill = Some(ParSpill {
+                    frames: remaining,
+                    align,
+                    leading,
+                    costs,
+                    spacing,
+                });
+                if advance_on_spill {
+                    self.composer.work.advance();
+                }
+                return Err(Stop::Finish(false));
+            }
+
+            self.frame(frame, align, false, false)?;
+        }
+
+        // Add spacing after the paragraph
+        let resolved_spacing = spacing.relative_to(self.regions.base().y);
+        self.rel(resolved_spacing.into(), 4);
 
         Ok(())
     }

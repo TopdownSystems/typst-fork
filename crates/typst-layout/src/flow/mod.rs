@@ -22,8 +22,8 @@ use typst_library::introspection::{
     Introspector, Location, Locator, LocatorLink, SplitLocator, Tag,
 };
 use typst_library::layout::{
-    Abs, ColumnsElem, Dir, Em, Fragment, Frame, PageElem, PlacementScope, Region,
-    Regions, Rel, Size,
+    Abs, Axes, ColumnsElem, Dir, Em, FixedAlignment, Fragment, Frame, PageElem,
+    PlacementScope, Region, Regions, Rel, Size,
 };
 use typst_library::model::{FootnoteElem, FootnoteEntry, LineNumberingScope, ParLine};
 use typst_library::pdf::ArtifactKind;
@@ -307,12 +307,30 @@ struct Work<'a, 'b> {
     footnotes: EcoVec<Packed<FootnoteElem>>,
     /// Spilled frames of a footnote that didn't fully fit. Similar to `spill`.
     footnote_spill: Option<std::vec::IntoIter<Frame>>,
+    /// Spilled frames of a deferred paragraph that didn't fully fit.
+    /// Contains: (remaining frames, alignment, leading, costs, spacing).
+    par_spill: Option<ParSpill>,
     /// Queued tags that will be attached to the next frame.
     tags: EcoVec<&'a Tag>,
     /// Identifies floats and footnotes that can be skipped if visited because
     /// they were already handled and incorporated as column or page level
     /// insertions.
     skips: Rc<FxHashSet<Location>>,
+}
+
+/// Spilled content from a deferred paragraph that broke across regions.
+#[derive(Clone)]
+pub struct ParSpill {
+    /// Remaining frames (lines) that didn't fit in the previous region.
+    pub frames: Vec<Frame>,
+    /// Alignment for the lines.
+    pub align: Axes<FixedAlignment>,
+    /// Leading between lines.
+    pub leading: Abs,
+    /// Costs for widow/orphan prevention.
+    pub costs: typst_library::text::Costs,
+    /// Spacing after the paragraph.
+    pub spacing: Rel<Abs>,
 }
 
 impl<'a, 'b> Work<'a, 'b> {
@@ -326,6 +344,7 @@ impl<'a, 'b> Work<'a, 'b> {
             mastheads: EcoVec::new(),
             footnotes: EcoVec::new(),
             footnote_spill: None,
+            par_spill: None,
             tags: EcoVec::new(),
             skips: Rc::new(FxHashSet::default()),
         }
@@ -345,6 +364,7 @@ impl<'a, 'b> Work<'a, 'b> {
     fn done(&self) -> bool {
         self.children.is_empty()
             && self.spill.is_none()
+            && self.par_spill.is_none()
             && self.floats.is_empty()
             && self.wraps.is_empty()
             && self.mastheads.is_empty()
