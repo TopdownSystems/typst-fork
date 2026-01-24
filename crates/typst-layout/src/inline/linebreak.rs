@@ -15,7 +15,7 @@ use icu_provider_adapters::fork::ForkByKeyProvider;
 use icu_provider_blob::BlobDataProvider;
 use icu_segmenter::LineSegmenter;
 use typst_library::engine::Engine;
-use typst_library::layout::{Abs, Em};
+use typst_library::layout::{Abs, Dir, Em};
 use typst_library::model::Linebreaks;
 use typst_library::text::{Lang, TextElem};
 use typst_syntax::link_prefix;
@@ -201,8 +201,16 @@ fn linebreak_simple_with_provider<'a>(
         // Compute the line and its size.
         let mut attempt = line(engine, p, start..end, breakpoint, lines.last());
 
-        // Store the start offset for this line (for cutout avoidance).
-        attempt.x_offset = width_info.start_offset;
+        // Store the offset and available width for this line (for cutout avoidance and justification).
+        // x_offset is the physical left-side offset:
+        // - For LTR: use start_offset (start is left, cutout on left pushes content right)
+        // - For RTL: use end_offset (end is left, cutout on left pushes content right)
+        attempt.x_offset = if p.config.dir == Dir::RTL {
+            width_info.end_offset
+        } else {
+            width_info.start_offset
+        };
+        attempt.available_width = Some(width_info.available);
 
         // If the line doesn't fit anymore, we push the last fitting attempt
         // into the stack and rebuild the line from the attempt's end. The
@@ -217,7 +225,13 @@ fn linebreak_simple_with_provider<'a>(
             // Re-query width at the new cumulative height after pushing previous line.
             let new_width_info = width_provider.width_at(cumulative_height);
             attempt = line(engine, p, start..end, breakpoint, lines.last());
-            attempt.x_offset = new_width_info.start_offset;
+            // x_offset is the physical left-side offset (see comment above)
+            attempt.x_offset = if p.config.dir == Dir::RTL {
+                new_width_info.end_offset
+            } else {
+                new_width_info.start_offset
+            };
+            attempt.available_width = Some(new_width_info.available);
         }
 
         // Finish the current line if there is a mandatory line break (i.e. due

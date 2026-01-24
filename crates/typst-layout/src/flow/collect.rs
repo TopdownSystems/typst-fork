@@ -20,10 +20,10 @@ use typst_library::introspection::{
     Introspector, Location, Locator, LocatorLink, SplitLocator, Tag, TagElem,
 };
 use typst_library::layout::{
-    Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, CutoutSide, FixedAlignment,
-    FlushElem, Fr, Fragment, Frame, FrameParent, Inherit, MastheadElem, PagebreakElem,
-    PlaceElem, PlacementScope, Ratio, Region, Regions, Rel, Size, Sizing, Spacing, VElem,
-    WrapElem,
+    Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, CutoutSide, Dir,
+    FixedAlignment, FlushElem, Fr, Fragment, Frame, FrameParent, Inherit, MastheadElem,
+    PagebreakElem, PlaceElem, PlacementScope, Ratio, Region, Regions, Rel, Size, Sizing,
+    Spacing, VElem, WrapElem,
 };
 use typst_library::model::ParElem;
 use typst_library::routines::{Pair, Routines};
@@ -392,6 +392,7 @@ impl<'a> Collector<'a, '_, '_> {
             side,
             scope,
             clearance,
+            text_dir: dir,
             elem,
             styles,
             locator,
@@ -417,6 +418,7 @@ impl<'a> Collector<'a, '_, '_> {
             scope,
             clearance,
             width,
+            text_dir: dir,
             elem,
             styles,
             locator,
@@ -467,6 +469,7 @@ pub enum Child<'a> {
     /// An explicit column break.
     Break(bool),
 }
+
 
 /// A child that encapsulates a layouted line of a paragraph.
 #[derive(Debug)]
@@ -844,6 +847,8 @@ pub struct WrapChild<'a> {
     pub scope: PlacementScope,
     /// The clearance between wrap content and flowing text.
     pub clearance: Abs,
+    /// The text direction, used for converting logical sides to physical alignment.
+    pub text_dir: Dir,
     /// The wrap element itself.
     elem: &'a Packed<WrapElem>,
     /// The styles applicable to this wrap.
@@ -899,6 +904,8 @@ pub struct MastheadChild<'a> {
     pub clearance: Abs,
     /// The explicit width of the masthead column.
     pub width: Abs,
+    /// The text direction, used for converting logical sides to physical alignment.
+    pub text_dir: Dir,
     /// The masthead element itself.
     elem: &'a Packed<MastheadElem>,
     /// The styles applicable to this masthead.

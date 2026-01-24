@@ -240,7 +240,7 @@ pub fn width_at(
     region_width: Abs,
     y: Abs,
     cutouts: &[RegionCutout],
-    dir: Dir,
+    _dir: Dir,
 ) -> WidthInfo {
     // Fast path: no cutouts
     if cutouts.is_empty() {
@@ -267,11 +267,11 @@ pub fn width_at(
     // Calculate available width, ensuring it doesn't go negative
     let available = (region_width - start_reduction - end_reduction).max(Abs::zero());
 
-    // Swap offsets for RTL direction
-    let (start_offset, end_offset) = match dir {
-        Dir::LTR | Dir::TTB | Dir::BTT => (start_reduction, end_reduction),
-        Dir::RTL => (end_reduction, start_reduction),
-    };
+    // CutoutSide is logical (Start/End), and WidthInfo offsets are also logical.
+    // No swap is needed - start_reduction goes to start_offset, end_reduction to end_offset.
+    // The x_offset application in line finalization handles the physical positioning.
+    let start_offset = start_reduction;
+    let end_offset = end_reduction;
 
     WidthInfo::new(available, start_offset, end_offset)
 }
@@ -286,7 +286,7 @@ pub fn width_in_range(
     y_start: Abs,
     y_end: Abs,
     cutouts: &[RegionCutout],
-    dir: Dir,
+    _dir: Dir,
 ) -> WidthInfo {
     // Fast path: no cutouts
     if cutouts.is_empty() {
@@ -313,11 +313,10 @@ pub fn width_in_range(
     // Calculate available width, ensuring it doesn't go negative
     let available = (region_width - start_reduction - end_reduction).max(Abs::zero());
 
-    // Swap offsets for RTL direction
-    let (start_offset, end_offset) = match dir {
-        Dir::LTR | Dir::TTB | Dir::BTT => (start_reduction, end_reduction),
-        Dir::RTL => (end_reduction, start_reduction),
-    };
+    // CutoutSide is logical (Start/End), and WidthInfo offsets are also logical.
+    // No swap is needed - the x_offset application handles physical positioning.
+    let start_offset = start_reduction;
+    let end_offset = end_reduction;
 
     WidthInfo::new(available, start_offset, end_offset)
 }
@@ -639,12 +638,13 @@ mod tests {
             );
             let cutouts = [cutout];
 
-            // In RTL, Start means right side, so offsets are swapped
+            // WidthInfo offsets are logical (not physical), regardless of direction.
+            // The physical interpretation is handled in linebreak.rs.
             let info = width_at(pt(500.0), pt(50.0), &cutouts, Dir::RTL);
             assert_eq!(info.available, pt(400.0)); // 500 - 80 - 20
-            // In RTL, the start_offset should be end_reduction (swapped)
-            assert_eq!(info.start_offset, pt(0.0));
-            assert_eq!(info.end_offset, pt(100.0)); // 80 + 20
+            // Offsets remain logical: start_offset is the start-side reduction
+            assert_eq!(info.start_offset, pt(100.0)); // 80 + 20 (start side cutout)
+            assert_eq!(info.end_offset, pt(0.0)); // no end side cutout
         }
 
         #[test]

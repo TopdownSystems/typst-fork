@@ -434,10 +434,18 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             PlacementScope::Parent => &mut self.page_insertions,
         };
 
-        // Determine horizontal alignment based on cutout side.
-        let align_x = match wrap.side {
-            typst_library::layout::CutoutSide::Start => FixedAlignment::Start,
-            typst_library::layout::CutoutSide::End => FixedAlignment::End,
+        // Determine horizontal alignment based on cutout side and text direction.
+        // CutoutSide is logical (Start/End), but we need physical alignment.
+        // For LTR: Start = left, End = right
+        // For RTL: Start = right, End = left
+        let align_x = match (wrap.side, wrap.text_dir) {
+            (typst_library::layout::CutoutSide::Start, Dir::LTR) => FixedAlignment::Start,
+            (typst_library::layout::CutoutSide::Start, Dir::RTL) => FixedAlignment::End,
+            (typst_library::layout::CutoutSide::End, Dir::LTR) => FixedAlignment::End,
+            (typst_library::layout::CutoutSide::End, Dir::RTL) => FixedAlignment::Start,
+            // TTB/BTT default to LTR-like behavior
+            (typst_library::layout::CutoutSide::Start, _) => FixedAlignment::Start,
+            (typst_library::layout::CutoutSide::End, _) => FixedAlignment::End,
         };
 
         // Put the wrap frame there (at current vertical position).
@@ -528,10 +536,18 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             PlacementScope::Parent => &mut self.page_insertions,
         };
 
-        // Determine horizontal alignment based on cutout side.
-        let align_x = match masthead.side {
-            typst_library::layout::CutoutSide::Start => FixedAlignment::Start,
-            typst_library::layout::CutoutSide::End => FixedAlignment::End,
+        // Determine horizontal alignment based on cutout side and text direction.
+        // CutoutSide is logical (Start/End), but we need physical alignment.
+        // For LTR: Start = left, End = right
+        // For RTL: Start = right, End = left
+        let align_x = match (masthead.side, masthead.text_dir) {
+            (typst_library::layout::CutoutSide::Start, Dir::LTR) => FixedAlignment::Start,
+            (typst_library::layout::CutoutSide::Start, Dir::RTL) => FixedAlignment::End,
+            (typst_library::layout::CutoutSide::End, Dir::LTR) => FixedAlignment::End,
+            (typst_library::layout::CutoutSide::End, Dir::RTL) => FixedAlignment::Start,
+            // TTB/BTT default to LTR-like behavior
+            (typst_library::layout::CutoutSide::Start, _) => FixedAlignment::Start,
+            (typst_library::layout::CutoutSide::End, _) => FixedAlignment::End,
         };
 
         // Put the masthead frame there (at current vertical position).

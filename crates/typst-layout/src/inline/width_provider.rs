@@ -330,10 +330,11 @@ mod tests {
 
             let info = provider.width_at(pt(50.0));
             assert_eq!(info.available, pt(400.0)); // 500 - 80 - 20
-            // In RTL, start_offset should be swapped (was end_reduction, now 0)
-            // and end_offset should be the start_reduction
-            assert_eq!(info.start_offset, pt(0.0));
-            assert_eq!(info.end_offset, pt(100.0)); // 80 + 20
+            // WidthInfo offsets are logical (not physical), so no swapping occurs.
+            // The physical interpretation (which offset to use for x_offset) is
+            // handled in linebreak.rs based on text direction.
+            assert_eq!(info.start_offset, pt(100.0)); // 80 + 20 (start side reduction)
+            assert_eq!(info.end_offset, pt(0.0)); // no end side cutout
         }
 
         #[test]

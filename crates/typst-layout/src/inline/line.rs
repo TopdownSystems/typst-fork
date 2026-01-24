@@ -51,6 +51,12 @@ pub struct Line<'a> {
     /// horizontally to avoid the cutout area. This offset is applied
     /// during frame finalization.
     pub x_offset: Abs,
+    /// The available width used to compute this line (for justification).
+    ///
+    /// When cutouts are present, each line may have a different available width.
+    /// This is used instead of the full region width for justification calculations.
+    /// When `None`, the full region width is used (backwards compatibility).
+    pub available_width: Option<Abs>,
 }
 
 impl Line<'_> {
@@ -62,6 +68,7 @@ impl Line<'_> {
             justify: false,
             dash: None,
             x_offset: Abs::zero(),
+            available_width: None,
         }
     }
 
@@ -204,7 +211,7 @@ pub fn line<'a>(
     // Compute the line's width.
     let width = items.iter().map(Item::natural_width).sum();
 
-    Line { items, width, justify, dash, x_offset: Abs::zero() }
+    Line { items, width, justify, dash, x_offset: Abs::zero(), available_width: None }
 }
 
 /// Collects / reshapes all items for the line with the given `range`.
@@ -501,7 +508,10 @@ pub fn commit(
     full: Abs,
     locator: &mut SplitLocator<'_>,
 ) -> SourceResult<Frame> {
-    let mut remaining = width - line.width - p.config.hanging_indent;
+    // Use the line's available width for justification if set (when cutouts are present),
+    // otherwise fall back to the full frame width.
+    let justify_width = line.available_width.unwrap_or(width);
+    let mut remaining = justify_width - line.width - p.config.hanging_indent;
     let mut offset = Abs::zero();
 
     // We always build the line from left to right. In an LTR paragraph, we must
@@ -511,12 +521,9 @@ pub fn commit(
         offset += p.config.hanging_indent;
     }
 
-    // Apply x_offset for cutout avoidance (text flow around images).
-    // This shifts the line to avoid overlapping with cutouts on the start side.
-    // Note: When cutouts are present, x_offset may be non-zero and the line width
-    // was computed using the reduced available width (accounting for both start
-    // and end cutouts). The frame width here is the full region width, so we
-    // cannot directly validate x_offset + line.width <= width.
+    // Apply x_offset for cutout avoidance (text flow around images/mastheads).
+    // x_offset is always the physical left-side offset (set in linebreak.rs based on direction).
+    // This shifts the line to avoid overlapping with cutouts on the left side of the frame.
     offset += line.x_offset;
 
     // Handle hanging punctuation to the left.
