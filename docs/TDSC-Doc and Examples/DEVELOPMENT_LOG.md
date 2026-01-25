@@ -78,25 +78,38 @@ This document tracks the complete development lifecycle of the Typst text-flow f
 
 ### 2026-01-25 - Phase 7 Enhancement (Masthead Overflow Feature)
 
-#### Bug Fix - **PARAGRAPH SPILL WITH MASTHEADS DOCUMENTED** ✅
+#### Bug Fix - **PARAGRAPH SPILL WITH MASTHEADS FIXED** ✅
 
 **Author**: Claude Code
-**Type**: Bug Investigation & Documentation
-**Status**: ✅ **DOCUMENTED - Known limitation with workaround**
+**Type**: Bug Fix
+**Status**: ✅ **FIXED - Spilled paragraphs now re-layout at full width**
 
 **Problem Discovered**:
-When a paragraph starts on a page with a masthead and spans to subsequent pages (paragraph spill), the text on page 2+ retains the narrow width as if the masthead were still present.
+When a paragraph starts on a page with a masthead and spans to subsequent pages (paragraph spill), the text on page 2+ retained the narrow width as if the masthead were still present.
 
 **Root Cause Analysis**:
-The `ParSpill` mechanism saves pre-formatted paragraph lines (with their widths baked in) to continue on the next page. These lines were computed with masthead cutouts on page 1, so they retain narrow widths even though page 2 has no cutouts.
+The `ParSpill` mechanism saves pre-formatted paragraph lines (with their widths baked in) to continue on the next page. These lines were computed with masthead cutouts on page 1, so they retained narrow widths even though page 2 has no cutouts.
 
-**Resolution**:
-- Documented as known limitation in README.md (Section 4)
-- Updated test-50000.typ to use multiple smaller paragraphs as workaround
-- Added missing masthead processing in `column_contents` (fixes a separate issue where queued mastheads with `overflow: "paginate"` were not being placed on subsequent pages)
+**Solution Implemented**:
+Modified `ParSpill` to store a reference to the original paragraph and track lines already placed. When processing spilled content, the system now checks if the current page has no cutouts - if so, the remaining paragraph content is re-laid out at full width rather than using the pre-formatted narrow lines.
 
-**Workaround for Users**:
-Break long paragraphs into smaller ones when using mastheads, or ensure masthead content fits on its starting page.
+**Files Modified**:
+
+1. **`crates/typst-layout/src/flow/mod.rs`**:
+   - Added `par: Option<&'b ParChild<'a>>` field to `ParSpill` struct
+   - Added `lines_placed: usize` field to track progress through paragraph
+   - Updated `Work` struct to use `ParSpill<'a, 'b>` with proper lifetimes
+
+2. **`crates/typst-layout/src/flow/distribute.rs`**:
+   - Modified `par_spill()` to detect when cutouts have changed
+   - Added re-layout logic: when current page has no cutouts but paragraph was laid out with cutouts, call `par.layout()` with empty cutouts and skip already-placed lines
+   - Updated `process_par_lines()` to accept `par` and `lines_placed_before` parameters for spill tracking
+
+**Test Verification**:
+- ✅ All 19 masthead tests passing
+- ✅ All 24 wrap tests passing
+- ✅ test-50000.typ now correctly shows full-width text on page 2+
+- Updated 4 reference images that now produce correct output
 
 ---
 

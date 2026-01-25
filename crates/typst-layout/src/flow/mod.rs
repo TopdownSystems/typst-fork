@@ -309,7 +309,7 @@ struct Work<'a, 'b> {
     footnote_spill: Option<std::vec::IntoIter<Frame>>,
     /// Spilled frames of a deferred paragraph that didn't fully fit.
     /// Contains: (remaining frames, alignment, leading, costs, spacing).
-    par_spill: Option<ParSpill>,
+    par_spill: Option<ParSpill<'a, 'b>>,
     /// Queued tags that will be attached to the next frame.
     tags: EcoVec<&'a Tag>,
     /// Identifies floats and footnotes that can be skipped if visited because
@@ -320,7 +320,7 @@ struct Work<'a, 'b> {
 
 /// Spilled content from a deferred paragraph that broke across regions.
 #[derive(Clone)]
-pub struct ParSpill {
+pub struct ParSpill<'a, 'b> {
     /// Remaining frames (lines) that didn't fit in the previous region.
     pub frames: Vec<Frame>,
     /// Alignment for the lines.
@@ -331,6 +331,12 @@ pub struct ParSpill {
     pub costs: typst_library::text::Costs,
     /// Spacing after the paragraph.
     pub spacing: Rel<Abs>,
+    /// The original paragraph, used for re-layout if cutouts change.
+    /// This is Some when the paragraph was laid out with cutouts.
+    pub par: Option<&'b ParChild<'a>>,
+    /// Number of lines already placed from this paragraph.
+    /// Used to skip already-placed lines when re-laying out.
+    pub lines_placed: usize,
 }
 
 impl<'a, 'b> Work<'a, 'b> {

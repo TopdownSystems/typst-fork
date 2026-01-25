@@ -319,6 +319,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Get the current y position and cutouts
         let y_offset = self.current_y();
         let cutouts = &self.composer.column_cutouts;
+        let has_cutouts = !cutouts.is_empty();
 
         // Layout the paragraph with cutout information
         let frames = par.layout(self.composer.engine, cutouts, y_offset)?;
@@ -330,6 +331,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Process lines using the common helper, which handles spilling.
         // Note: spacing after paragraph is added by process_par_lines.
         // Pass `true` for `advance_on_spill` since this is a new paragraph.
+        // Only store par reference if we had cutouts (for potential re-layout).
         self.process_par_lines(
             frames,
             par.align,
@@ -337,6 +339,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             par.costs,
             par.spacing,
             true, // advance the child when spilling
+            if has_cutouts { Some(par) } else { None },
+            0, // starting from line 0
         )
     }
 
@@ -423,15 +427,39 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Processes spillover from a deferred paragraph.
-    fn par_spill(&mut self, spill: ParSpill) -> FlowResult<()> {
+    fn par_spill(&mut self, spill: ParSpill<'a, 'b>) -> FlowResult<()> {
         // Skip directly if the region is already (over)full.
         if self.regions.is_full() {
             self.composer.work.par_spill = Some(spill);
             return Err(Stop::Finish(false));
         }
 
-        // Process the remaining lines.
-        // Pass `false` for `advance_on_spill` since the child was already advanced.
+        // Check if we should re-layout: if the original paragraph was laid out
+        // with cutouts but the current page has no cutouts, re-layout at full width.
+        let current_cutouts = &self.composer.column_cutouts;
+        if spill.par.is_some() && current_cutouts.is_empty() {
+            // Re-layout the paragraph without cutouts to get full-width lines.
+            let par = spill.par.unwrap();
+            let y_offset = self.current_y();
+            let all_frames = par.layout(self.composer.engine, current_cutouts, y_offset)?;
+
+            // Skip lines that were already placed on previous pages.
+            let frames: Vec<Frame> = all_frames.into_iter().skip(spill.lines_placed).collect();
+
+            // Process the remaining lines at full width.
+            return self.process_par_lines(
+                frames,
+                spill.align,
+                spill.leading,
+                spill.costs,
+                spill.spacing,
+                false, // don't advance - already done
+                None,  // no need to store par again
+                spill.lines_placed, // track total lines placed
+            );
+        }
+
+        // No re-layout needed - use the stored frames.
         self.process_par_lines(
             spill.frames,
             spill.align,
@@ -439,6 +467,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             spill.costs,
             spill.spacing,
             false, // don't advance - already done
+            spill.par, // preserve par reference in case of further spill
+            spill.lines_placed, // track total lines placed
         )
     }
 
@@ -451,6 +481,12 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     /// the work queue when spilling. This should be `true` when called from
     /// `par()` (to mark the Par child as processed) and `false` when called
     /// from `par_spill()` (since the child was already advanced).
+    ///
+    /// The `par` parameter is an optional reference to the original paragraph,
+    /// used for re-layout if cutouts change on subsequent pages.
+    ///
+    /// The `lines_placed_before` parameter tracks how many lines were already
+    /// placed on previous pages (for re-layout skip calculation).
     fn process_par_lines(
         &mut self,
         frames: Vec<Frame>,
@@ -459,6 +495,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         costs: typst_library::text::Costs,
         spacing: Rel<Abs>,
         advance_on_spill: bool,
+        par: Option<&'b ParChild<'a>>,
+        lines_placed_before: usize,
     ) -> FlowResult<()> {
         // Determine whether to prevent widows and orphans
         let len = frames.len();
@@ -501,12 +539,16 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 // Save remaining lines (including current one) as spill
                 let mut remaining: Vec<Frame> = vec![frame];
                 remaining.extend(frames_iter.map(|(_, f)| f));
+                // Track total lines placed: lines_placed_before + lines placed this call
+                let total_lines_placed = lines_placed_before + i;
                 self.composer.work.par_spill = Some(ParSpill {
                     frames: remaining,
                     align,
                     leading,
                     costs,
                     spacing,
+                    par,
+                    lines_placed: total_lines_placed,
                 });
                 if advance_on_spill {
                     self.composer.work.advance();
@@ -526,12 +568,16 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 // Save remaining lines (including current one) as spill
                 let mut remaining: Vec<Frame> = vec![frame];
                 remaining.extend(frames_iter.map(|(_, f)| f));
+                // Track total lines placed: lines_placed_before + lines placed this call
+                let total_lines_placed = lines_placed_before + i;
                 self.composer.work.par_spill = Some(ParSpill {
                     frames: remaining,
                     align,
                     leading,
                     costs,
                     spacing,
+                    par,
+                    lines_placed: total_lines_placed,
                 });
                 if advance_on_spill {
                     self.composer.work.advance();
