@@ -254,6 +254,12 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             self.wrap(wrap, &regions, Abs::zero(), false)?;
         }
 
+        // Process pending mastheads.
+        for masthead in std::mem::take(&mut self.work.mastheads) {
+            // Mastheads at start of region begin at y=0.
+            self.masthead(masthead, &regions, Abs::zero(), false)?;
+        }
+
         distribute(self, regions)
     }
 

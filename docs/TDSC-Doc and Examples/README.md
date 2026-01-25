@@ -110,7 +110,33 @@ Alternatively, place wraps earlier in the content to ensure they fit on their or
 
 ---
 
-### 4. Left-Side Mastheads with Headings
+### 4. Masthead Cutout Persists in Spilled Paragraphs
+
+**Status:** Known limitation
+
+**Symptom:** When a paragraph starts on a page with a masthead and continues to the next page (paragraph spill), the text on the second page continues to flow in a narrow column as if the masthead were still present, even though the masthead only appears on page 1.
+
+**Cause:** When paragraphs are laid out with mastheads, they use variable-width line breaking that accounts for the masthead cutout. If the paragraph spans multiple pages, the already-formatted lines are saved and reused on subsequent pages. These pre-formatted lines retain their narrow widths from page 1.
+
+**Workaround:** For documents with mastheads and very long paragraphs:
+```typst
+// Option 1: Break long paragraphs into smaller ones
+#masthead(right, 100pt)[Sidebar]
+First paragraph with moderate length.
+
+Second paragraph continues with moderate length.
+
+// Option 2: Use a page break before masthead section
+#pagebreak()
+#masthead(right, 100pt)[Sidebar]
+Content that fits on this page...
+```
+
+**Note:** This is a fundamental limitation of the paragraph spill mechanism. Fixing it would require re-laying out spilled paragraphs with current page cutouts, which has performance implications.
+
+---
+
+### 5. Left-Side Mastheads with Headings
 
 **Status:** Known limitation
 

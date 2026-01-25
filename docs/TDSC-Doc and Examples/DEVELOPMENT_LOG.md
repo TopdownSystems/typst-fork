@@ -78,6 +78,28 @@ This document tracks the complete development lifecycle of the Typst text-flow f
 
 ### 2026-01-25 - Phase 7 Enhancement (Masthead Overflow Feature)
 
+#### Bug Fix - **PARAGRAPH SPILL WITH MASTHEADS DOCUMENTED** ✅
+
+**Author**: Claude Code
+**Type**: Bug Investigation & Documentation
+**Status**: ✅ **DOCUMENTED - Known limitation with workaround**
+
+**Problem Discovered**:
+When a paragraph starts on a page with a masthead and spans to subsequent pages (paragraph spill), the text on page 2+ retains the narrow width as if the masthead were still present.
+
+**Root Cause Analysis**:
+The `ParSpill` mechanism saves pre-formatted paragraph lines (with their widths baked in) to continue on the next page. These lines were computed with masthead cutouts on page 1, so they retain narrow widths even though page 2 has no cutouts.
+
+**Resolution**:
+- Documented as known limitation in README.md (Section 4)
+- Updated test-50000.typ to use multiple smaller paragraphs as workaround
+- Added missing masthead processing in `column_contents` (fixes a separate issue where queued mastheads with `overflow: "paginate"` were not being placed on subsequent pages)
+
+**Workaround for Users**:
+Break long paragraphs into smaller ones when using mastheads, or ensure masthead content fits on its starting page.
+
+---
+
 #### Session Continuation - **MASTHEAD OVERFLOW FEATURE IMPLEMENTED** ✅
 
 **Author**: Claude Code
