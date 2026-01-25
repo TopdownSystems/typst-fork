@@ -1,10 +1,27 @@
 //! The masthead element for newsletter-style column layouts.
 
-use crate::foundations::{Content, StyleChain, elem};
+use crate::foundations::{Cast, Content, StyleChain, elem};
 use crate::introspection::{Locatable, Tagged};
 use crate::layout::{CutoutSide, Dir, Em, Length, OuterHAlignment, PlacementScope};
 
 use super::wrap::outer_h_alignment_to_cutout_side;
+
+/// How to handle masthead content that exceeds the available region height.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Cast)]
+pub enum MastheadOverflow {
+    /// Clip content that exceeds the available height (default).
+    ///
+    /// When masthead content is taller than the available region, it will be
+    /// truncated to fit. A warning will be emitted when this occurs.
+    #[default]
+    Clip,
+    /// Allow content to paginate across multiple regions.
+    ///
+    /// When masthead content is taller than the available region, the layout
+    /// will attempt to continue on subsequent pages. Note: This requires
+    /// sufficient flowing text content to trigger page breaks.
+    Paginate,
+}
 
 /// A masthead sidebar for newsletter-style layouts.
 ///
@@ -161,6 +178,31 @@ pub struct MastheadElem {
     /// #lorem(80)
     /// ```
     pub scope: PlacementScope,
+
+    /// How to handle content that exceeds the available region height.
+    ///
+    /// - `"clip"` (default): Truncate content that doesn't fit. A warning is
+    ///   emitted when content is clipped.
+    /// - `"paginate"`: Attempt to continue on subsequent pages. Requires
+    ///   sufficient flowing text content to trigger page breaks.
+    ///
+    /// ```example
+    /// #set page(width: 200pt, height: 150pt)
+    ///
+    /// #masthead(60pt, overflow: "clip")[
+    ///   *Long Content*
+    ///
+    ///   This sidebar has more content than fits in the region. It will be
+    ///   clipped to the available height.
+    ///
+    ///   More content here...
+    ///
+    ///   And even more...
+    /// ]
+    ///
+    /// Short text.
+    /// ```
+    pub overflow: MastheadOverflow,
 }
 
 impl MastheadElem {

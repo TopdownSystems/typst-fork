@@ -140,6 +140,7 @@ of the masthead sidebar.
 | `body` | content | (required) | The content inside the masthead |
 | `clearance` | length | `1em` | Gap between masthead and flowing text |
 | `scope` | `column`, `parent` | `column` | Whether masthead affects just the column or spans columns |
+| `overflow` | `clip`, `paginate` | `clip` | How to handle content that exceeds available height |
 
 ### Width is Required
 
@@ -167,6 +168,38 @@ The masthead automatically extends to the full height of the column:
 Text in the main column flows alongside the masthead
 for the entire page/column height.
 ```
+
+### Overflow Handling
+
+When masthead content exceeds the available region height, the `overflow` parameter controls behavior:
+
+**`clip` (default)**: Truncates content that doesn't fit and emits a warning.
+
+```typst
+#set page(height: 100pt)
+
+#masthead(60pt, overflow: "clip")[
+  This long content will be truncated to fit the available
+  space. A warning will be emitted during compilation.
+]
+
+Short main text.
+```
+
+**`paginate`**: Attempts to continue masthead content on subsequent pages. Requires sufficient flowing text to trigger page breaks.
+
+```typst
+#set page(height: 200pt)
+
+#masthead(60pt, overflow: "paginate")[
+  Long masthead content that spans multiple pages...
+]
+
+// Sufficient text to fill pages and trigger masthead continuation
+#lorem(200)
+```
+
+Note: The `clip` mode prevents infinite loops that could occur when masthead content exceeds available space but there isn't enough flowing text to trigger page breaks.
 
 ---
 

@@ -18,7 +18,7 @@ This folder contains all development documentation, code reviews, and examples f
 
 ```typst
 // Simple wrap example - image with text flowing around it
-#wrap(side: right, clearance: 1em)[
+#wrap(right, clearance: 1em)[
   #image("photo.jpg", width: 4cm)
 ]
 Lorem ipsum dolor sit amet...
@@ -69,37 +69,75 @@ PDFs will render correctly but won't have accessibility structure tags.
 
 ---
 
-### 2. Masthead Overflow on Empty/Short Pages
+### 2. ~~Masthead Overflow on Empty/Short Pages~~ (FIXED)
 
-**Status:** Known issue, fix planned
+**Status:** FIXED in January 2026
 
-**Symptom:** When a masthead is placed on a page with little or no text content, the masthead content may overflow beyond the page boundary instead of being truncated or paginated.
+**Original Issue:** When a masthead was placed on a page with little or no text content, the masthead content would overflow or cause an infinite loop.
 
-**Cause:** Mastheads are designed to extend the full height of the column/region. When the masthead content exceeds the available region height and there's no text to trigger natural page breaks, the masthead content overflows.
+**Solution:** Added `overflow` parameter to masthead with two modes:
+- `clip` (default): Truncates content that exceeds available height and emits a warning
+- `paginate`: Attempts to continue on subsequent pages (requires sufficient flowing text)
 
-**Workaround:** Ensure pages with mastheads have sufficient text content, or manually constrain masthead content height:
 ```typst
-#masthead(left, 3cm)[
-  #block(height: 100%, clip: true)[
-    // Masthead content that may be long
-  ]
+#masthead(60pt, overflow: "clip")[
+  Long content that will be truncated if it doesn't fit...
 ]
 ```
 
-**Planned Fix:** Masthead content should be truncated (clipped) when it exceeds the available region height, rather than overflowing.
+---
+
+### 3. Wraps at Page Boundaries
+
+**Status:** Known limitation
+
+**Symptom:** When wrap elements don't fit on a page and spill to the next page, text that was already laid out after the wrap may overlap with the wrap content on the new page.
+
+**Cause:** When wraps are queued for the next page, text that was laid out in the same paragraph on the original page also spills over. However, this spilled text was already formatted without knowledge of the cutouts that will appear on the new page.
+
+**Workaround:** Ensure wraps have enough space on their starting page:
+```typst
+// Add a page break before wrap-heavy sections if needed
+#pagebreak()
+
+#wrap(right)[...]
+Text that should flow around the wrap...
+```
+
+Alternatively, place wraps earlier in the content to ensure they fit on their original page, or use mastheads (which have better page boundary handling).
+
+**Note:** This is a complex layout interaction that would require significant changes to the flow engine to resolve fully. The issue is most visible when multiple wraps appear near page boundaries.
+
+---
+
+### 4. Left-Side Mastheads with Headings
+
+**Status:** Known limitation
+
+**Symptom:** When using a left-side masthead, heading text may overlap with the masthead content. This is especially noticeable with numbered headings (e.g., "1. Introduction") where the number extends into the masthead's cutout region.
+
+**Cause:** Typst headings are positioned at the left edge of the available text area. When a left-side masthead creates a cutout, the heading text starts at the cutout boundary, but the heading's visual rendering (especially with numbered headings using hanging indent style) may extend into the cutout region.
+
+**Workarounds:**
+1. Use a right-side masthead instead of left-side
+2. Disable heading numbering when using left-side mastheads
+3. Ensure wraps on the same side as the masthead are avoided
+
+```typst
+// Prefer right-side mastheads to avoid heading conflicts
+#masthead(right, 3cm)[
+  Sidebar content...
+]
+
+// If using left masthead, disable heading numbering
+// #set heading(numbering: "1.")  // Commented out
+```
 
 ---
 
 ## Future Features
 
-### 1. Masthead Truncation/Pagination
-
-Implement proper handling when masthead content exceeds region height:
-- Option A: Truncate (clip) content that doesn't fit
-- Option B: Allow masthead content to paginate across pages
-- May require a new parameter like `overflow: clip | paginate`
-
-### 2. `first_page_only` Parameter for Masthead
+### 1. `first_page_only` Parameter for Masthead
 
 Allow mastheads to appear only on the first page of a document or section:
 ```typst

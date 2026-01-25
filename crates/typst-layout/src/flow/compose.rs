@@ -13,10 +13,13 @@ use typst_library::introspection::{
     Counter, CounterDisplayElem, CounterState, CounterUpdate, Location, Locator,
     SplitLocator, Tag,
 };
+use typst_library::diag::warning;
 use typst_library::layout::{
     Abs, Axes, Dir, FixedAlignment, Fragment, Frame, FrameItem, FrameParent, Inherit,
-    OuterHAlignment, PlacementScope, Point, Region, RegionCutout, Regions, Rel, Size,
+    MastheadOverflow, OuterHAlignment, PlacementScope, Point, Region, RegionCutout,
+    Regions, Rel, Size,
 };
+use typst_library::visualize::Curve;
 use typst_library::model::{
     FootnoteElem, FootnoteEntry, LineNumberingScope, Numbering, ParLineMarker,
 };
@@ -486,7 +489,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         };
 
         // Lay out the masthead content with explicit width.
-        let frame = masthead.layout(self.engine, base)?;
+        let mut frame = masthead.layout(self.engine, base)?;
 
         // Determine the remaining space in the scope.
         let remaining = match masthead.scope {
@@ -505,10 +508,33 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         let clearance_amount = if clearance { masthead.clearance } else { Abs::zero() };
         let need = frame.height() + clearance_amount;
 
-        // If the masthead doesn't fit, queue it for the next region.
-        if !remaining.fits(need) && regions.may_progress() {
-            self.work.mastheads.push(masthead);
-            return Ok(());
+        // If the masthead doesn't fit, handle according to overflow setting.
+        if !remaining.fits(need) {
+            match masthead.overflow {
+                MastheadOverflow::Paginate if regions.may_progress() => {
+                    // Queue for next region (original behavior, but only if we can progress).
+                    self.work.mastheads.push(masthead);
+                    return Ok(());
+                }
+                MastheadOverflow::Paginate | MastheadOverflow::Clip => {
+                    // Clip the content to fit and emit a warning.
+                    // This handles both explicit Clip mode and Paginate mode when we can't progress.
+                    let available_height = remaining - clearance_amount;
+                    if available_height > Abs::zero() {
+                        // Clip the frame to available height using a rectangular curve.
+                        let clip_size = Size::new(frame.width(), available_height);
+                        frame.clip(Curve::rect(clip_size));
+
+                        // Emit a warning about the truncation.
+                        self.engine.sink.warn(warning!(
+                            masthead.span(),
+                            "masthead content exceeds available height and was truncated";
+                            hint: "use `overflow: \"paginate\"` to allow content to continue on subsequent pages"
+                        ));
+                    }
+                    // Continue with the clipped frame below.
+                }
+            }
         }
 
         // Create a cutout using the explicit width from the masthead.

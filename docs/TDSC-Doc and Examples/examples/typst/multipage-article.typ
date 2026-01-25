@@ -4,7 +4,11 @@
 #set page(paper: "a4", margin: 2cm)
 #set text(font: "Linux Libertine", size: 11pt)
 #set par(justify: true)
-#set heading(numbering: "1.")
+// Note: Heading numbering disabled because numbered headings use a hanging
+// indent that conflicts with left-side mastheads. The numbers would extend
+// into the cutout region. For documents with left mastheads, either use
+// unnumbered headings or place the masthead on the right side.
+// #set heading(numbering: "1.")
 
 // Title block
 #align(center)[
@@ -18,7 +22,9 @@
 #v(1.5em)
 
 // Masthead sidebar for the first page area
-#masthead(left, 3.5cm)[
+// Note: Using right side to avoid conflicts with heading alignment
+// (left-side mastheads can overlap with heading text that extends to the margin)
+#masthead(right, 3cm, clearance: 1em)[
   #set text(size: 9pt)
 
   #box(
@@ -55,7 +61,8 @@
 
 This document demonstrates how wrap and masthead elements work correctly in multi-page documents. The text flows naturally around sidebar content on the first page, and then continues at full width on subsequent pages.
 
-#wrap(right, clearance: 1em)[
+// Note: Using left side for this wrap to avoid conflict with the right-side masthead
+#wrap(left, clearance: 1em)[
   #box(
     width: 5cm,
     stroke: 2pt + blue,
@@ -105,6 +112,10 @@ This distinction makes wraps ideal for images and pull quotes, while mastheads w
 
 Once you understand the basics, you can create sophisticated layouts combining multiple elements.
 
+// Note: Page break ensures the Multiple Wraps section has room for both wraps
+// This avoids a known issue where wraps at page boundaries may overlap with text
+#pagebreak()
+
 == Multiple Wraps
 
 #wrap(right, clearance: 0.8em)[
@@ -150,6 +161,8 @@ Follow these guidelines for optimal results:
 
 == Content Width
 
+Avoid making wrap or masthead content so wide that the remaining text becomes difficult to read. As a rule of thumb, leave at least 60% of the column width for flowing text.
+
 #wrap(left, clearance: 1em)[
   #box(
     width: 4cm,
@@ -162,7 +175,9 @@ Follow these guidelines for optimal results:
   ]
 ]
 
-Avoid making wrap or masthead content so wide that the remaining text becomes difficult to read. As a rule of thumb, leave at least 60% of the column width for flowing text.
+This ensures that readers can comfortably read the main content without their eyes having to jump across large gaps. When planning your layout, consider the reading experience first. A well-balanced layout keeps readers engaged with the content.
+
+The visual balance between wrapped elements and flowing text is crucial for professional documents. Too narrow a text column forces excessive hyphenation and creates an uncomfortable reading rhythm. Conversely, wrapped elements that are too small may not provide sufficient visual weight to justify their presence. Finding the right proportion requires consideration of your content type, audience, and the overall document design.
 
 == Clearance Settings
 

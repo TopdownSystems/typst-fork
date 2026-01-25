@@ -199,3 +199,44 @@ Text with large clearance between it and the masthead column.
 ]
 
 #lorem(50)
+
+--- masthead-overflow-clip paged ---
+// Test overflow: clip (default) - content should be truncated.
+#set page(width: 200pt, height: 100pt)
+
+#masthead(left, 60pt, overflow: "clip")[
+  *Long Content*
+
+  This masthead content is too tall to fit in the region.
+  It will be clipped to the available height.
+
+  More content that won't appear...
+]
+
+Short text.
+
+--- masthead-overflow-paginate paged ---
+// Test overflow: paginate - content should continue on next page.
+#set page(width: 200pt, height: 150pt)
+
+#masthead(left, 60pt, overflow: "paginate")[
+  *Page 1*
+
+  Masthead content that spans multiple pages.
+
+  This part should appear on page 2...
+]
+
+#lorem(100)
+
+--- masthead-overflow-clip-explicit paged ---
+// Test explicit clip mode - should clip and warn.
+#set page(width: 200pt, height: 80pt)
+
+#masthead(right, 50pt, overflow: "clip")[
+  *Clipped*
+
+  This content is too tall and will be clipped.
+]
+
+Minimal text.

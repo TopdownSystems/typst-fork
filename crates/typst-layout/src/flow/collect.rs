@@ -22,8 +22,8 @@ use typst_library::introspection::{
 use typst_library::layout::{
     Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, CutoutSide, Dir,
     FixedAlignment, FlushElem, Fr, Fragment, Frame, FrameParent, Inherit, MastheadElem,
-    PagebreakElem, PlaceElem, PlacementScope, Ratio, Region, Regions, Rel, Size, Sizing,
-    Spacing, VElem, WrapElem,
+    MastheadOverflow, PagebreakElem, PlaceElem, PlacementScope, Ratio, Region, Regions,
+    Rel, Size, Sizing, Spacing, VElem, WrapElem,
 };
 use typst_library::model::ParElem;
 use typst_library::routines::{Pair, Routines};
@@ -408,6 +408,7 @@ impl<'a> Collector<'a, '_, '_> {
         let clearance = elem.clearance.resolve(styles);
         let scope = elem.scope.get(styles);
         let width = elem.width.resolve(styles);
+        let overflow = elem.overflow.get(styles);
 
         // Get text direction to resolve logical sides to physical sides.
         let dir = styles.resolve(TextElemModel::dir);
@@ -419,6 +420,7 @@ impl<'a> Collector<'a, '_, '_> {
             clearance,
             width,
             text_dir: dir,
+            overflow,
             elem,
             styles,
             locator,
@@ -906,6 +908,8 @@ pub struct MastheadChild<'a> {
     pub width: Abs,
     /// The text direction, used for converting logical sides to physical alignment.
     pub text_dir: Dir,
+    /// How to handle overflow when content exceeds available height.
+    pub overflow: MastheadOverflow,
     /// The masthead element itself.
     elem: &'a Packed<MastheadElem>,
     /// The styles applicable to this masthead.
@@ -949,6 +953,11 @@ impl MastheadChild<'_> {
     /// The element's location.
     pub fn location(&self) -> Location {
         self.elem.location().unwrap()
+    }
+
+    /// The element's span for diagnostic messages.
+    pub fn span(&self) -> typst_syntax::Span {
+        self.elem.span()
     }
 }
 
