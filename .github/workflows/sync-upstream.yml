@@ -3,7 +3,7 @@ name: Sync Upstream
 # Runs weekly on Sunday at midnight UTC, or manually
 on:
   schedule:
-    - cron: '0 0 * * 0'  # Weekly on Sunday at 00:00 UTC
+    - cron: '0 0 * * *'  # Daily at 00:00 UTC
   workflow_dispatch:      # Allow manual trigger
 
 jobs:
