@@ -12,7 +12,9 @@ These features enable magazine-style text flow where content wraps around images
 
 - A specialized extension of Typst with text-flow features (`wrap` and `masthead`)
 - Actively maintained to stay in sync with the upstream Typst repository
-- Used internally by TopdownSystems for production document generation
+- Intended for future production use by TopdownSystems pending QA acceptance
+
+**Status:** This feature branch is currently undergoing testing and has not yet been released into production. This document will be updated when the feature completes QA and moves to production use.
 
 ## What This Fork Is NOT
 
